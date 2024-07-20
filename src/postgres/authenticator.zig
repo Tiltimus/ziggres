@@ -8,13 +8,11 @@ const SASLInitialResponse = Message.SASLInitialResponse;
 
 const Authenticator = @This();
 
-allocator: Allocator,
 state: State,
 connect_info: ConnectInfo,
 
-pub fn init(allocator: Allocator, connect_info: ConnectInfo) Authenticator {
+pub fn init(connect_info: ConnectInfo) Authenticator {
     return Authenticator{
-        .allocator = allocator,
         .state = .{ .startup = undefined },
         .connect_info = connect_info,
     };
@@ -30,7 +28,6 @@ pub fn transition(self: *Authenticator, reader: AnyReader, writer: AnyWriter) !v
             };
 
             try Message.write(
-                self.allocator,
                 .{ .startup_message = startup_message },
                 writer,
             );
@@ -39,10 +36,7 @@ pub fn transition(self: *Authenticator, reader: AnyReader, writer: AnyWriter) !v
         },
 
         .received_authentication => {
-            const message = try Message.read(
-                self.allocator,
-                reader,
-            );
+            const message = try Message.read(reader);
 
             switch (message) {
                 .authentication_sasl => |authentication_sasl| {
@@ -57,12 +51,10 @@ pub fn transition(self: *Authenticator, reader: AnyReader, writer: AnyWriter) !v
 
         .received_sasl => |authentication_sasl| {
             const sasl_initial_response = try SASLInitialResponse.init(
-                self.allocator,
                 authentication_sasl.mechanism,
             );
 
             try Message.write(
-                self.allocator,
                 .{ .sasl_initial_response = sasl_initial_response },
                 writer,
             );
@@ -70,10 +62,7 @@ pub fn transition(self: *Authenticator, reader: AnyReader, writer: AnyWriter) !v
             self.state = .{ .sent_sasl_initial_response = sasl_initial_response };
         },
         .sent_sasl_initial_response => |sasl_initial_response| {
-            const message = try Message.read(
-                self.allocator,
-                reader,
-            );
+            const message = try Message.read(reader);
 
             switch (message) {
                 .authentication_sasl_continue => |sasl_continue| {
@@ -100,23 +89,14 @@ pub fn transition(self: *Authenticator, reader: AnyReader, writer: AnyWriter) !v
             };
 
             try Message.write(
-                self.allocator,
                 .{ .sasl_response = sasl_response },
                 writer,
             );
 
             self.state = .{ .sent_sasl_response = sasl_response };
         },
-        .sent_sasl_response => |sasl_response| {
-            self.allocator.free(sasl_response.nonce);
-            self.allocator.free(sasl_response.salt);
-            self.allocator.free(sasl_response.response);
-            self.allocator.free(sasl_response.client_first_message);
-
-            const message = try Message.read(
-                self.allocator,
-                reader,
-            );
+        .sent_sasl_response => |_| {
+            const message = try Message.read(reader);
 
             switch (message) {
                 .authentication_sasl_final => |final| {
@@ -128,13 +108,8 @@ pub fn transition(self: *Authenticator, reader: AnyReader, writer: AnyWriter) !v
                 else => @panic("Unexpected message."),
             }
         },
-        .received_sasl_final => |sasl_final| {
-            self.allocator.free(sasl_final.response);
-
-            const message = try Message.read(
-                self.allocator,
-                reader,
-            );
+        .received_sasl_final => |_| {
+            const message = try Message.read(reader);
 
             switch (message) {
                 .authentication_ok => |ok| {
@@ -148,10 +123,9 @@ pub fn transition(self: *Authenticator, reader: AnyReader, writer: AnyWriter) !v
         },
         .received_ok => |_| {
             // TODO: After the auth ok a bunch of meta data gets sent atm I don't care about it but needs to be added in ?
-            const buffer = try self.allocator.alloc(u8, 1024);
-            defer self.allocator.free(buffer);
+            var buffer: [1024]u8 = undefined;
 
-            _ = try reader.readAtLeast(buffer, 1);
+            _ = try reader.readAtLeast(&buffer, 1);
 
             self.state = .{ .authenticated = undefined };
         },

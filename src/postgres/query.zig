@@ -25,7 +25,6 @@ pub fn transition(self: *Query, reader: AnyReader, writer: AnyWriter) !void {
             };
 
             try Message.write(
-                self.allocator,
                 .{ .query = message },
                 writer,
             );
@@ -34,7 +33,6 @@ pub fn transition(self: *Query, reader: AnyReader, writer: AnyWriter) !void {
         },
         .received_query_response => {
             const message = try Message.read(
-                self.allocator,
                 reader,
             );
 
@@ -49,9 +47,7 @@ pub fn transition(self: *Query, reader: AnyReader, writer: AnyWriter) !void {
                 else => @panic("Unexpected message."),
             }
         },
-        .received_row_description => |row_description| {
-            row_description.deinit();
-
+        .received_row_description => |_| {
             const data_reader = DataReader{
                 .allocator = self.allocator,
                 .reader = reader,

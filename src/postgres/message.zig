@@ -4,6 +4,7 @@ const StringHashMap = std.StringHashMap([]const u8);
 const AnyReader = std.io.AnyReader;
 const AnyWriter = std.io.AnyWriter;
 const Stream = std.net.Stream;
+const LinkedList = std.SinglyLinkedList;
 const base_64_decoder = std.base64.standard.Decoder;
 const base_64_encoder = std.base64.standard.Encoder;
 const startsWith = std.mem.startsWith;
@@ -69,11 +70,11 @@ pub const AuthenticationSASL = struct {
 };
 
 pub const AuthenticationSASLContinue = struct {
-    nonce: []u8, // Might be safe to use [32]u8
-    salt: []u8,
+    nonce: [48]u8, // Might be safe to use [32]u8
+    salt: [16]u8,
     iteration: i32,
-    response: []u8,
-    client_message: []u8,
+    response: [84]u8,
+    client_message: [32]u8,
 };
 
 pub const StartupMessage = struct {
@@ -83,9 +84,11 @@ pub const StartupMessage = struct {
     options: StringHashMap = undefined,
 };
 
+// TODO: I think I want to have an iterator style for the
+// response or allow the end call to assgin an allocator if and when they get an error
 pub const ErrorResponse = struct {
     code: u8,
-    response: []u8,
+    // response: []u8,
 };
 
 pub const ParameterStatus = struct {
@@ -94,58 +97,48 @@ pub const ParameterStatus = struct {
 };
 
 pub const SASLInitialResponse = struct {
-    allocator: Allocator,
     mechanism: Mechanism,
-    client_message: []u8,
+    client_message: [32]u8,
 
-    pub fn init(allocator: Allocator, mechanism: Mechanism) !SASLInitialResponse {
+    pub fn init(mechanism: Mechanism) !SASLInitialResponse {
         var nonce: [18]u8 = undefined;
         var encoded_nonce: [24]u8 = undefined;
+        var client_message: [32]u8 = undefined;
 
         std.crypto.random.bytes(&nonce);
         _ = base_64_encoder.encode(&encoded_nonce, &nonce);
 
-        std.log.debug("Len: {d}", .{encoded_nonce.len});
-
-        const client_message = try std.fmt.allocPrint(
-            allocator,
+        _ = try std.fmt.bufPrint(
+            &client_message,
             "n,,n=,r={s}",
             .{encoded_nonce},
         );
 
         return SASLInitialResponse{
-            .allocator = allocator,
             .mechanism = mechanism,
             .client_message = client_message,
         };
     }
-
-    pub fn deinit(self: SASLInitialResponse) void {
-        self.allocator.free(self.client_message);
-    }
 };
 
 pub const SASLResponse = struct {
-    nonce: []u8,
-    salt: []u8,
+    nonce: [48]u8,
+    salt: [16]u8,
     iteration: i32,
-    response: []u8,
+    response: [84]u8,
     password: []const u8,
-    client_first_message: []u8,
+    client_first_message: [32]u8,
 };
 
-pub const AuthenticationSASLFinal = struct {
-    response: []u8,
-};
+pub const AuthenticationSASLFinal = struct {};
 
 pub const Query = struct {
     statement: []const u8,
 };
 
 pub const RowDescription = struct {
-    allocator: Allocator,
     fields: i16,
-    columns: []ColumnDescription,
+    columns: LinkedList(ColumnDescription),
 
     pub fn deinit(self: RowDescription) void {
         for (self.columns) |col| col.deinit();
@@ -154,18 +147,13 @@ pub const RowDescription = struct {
 };
 
 pub const ColumnDescription = struct {
-    allocator: Allocator,
-    field_name: []u8,
+    field_name: [64]u8,
     object_id: i32,
     attribute_id: i16,
     data_type_id: i32,
     data_type_size: i16,
     data_type_modifier: i32,
     format_code: i16,
-
-    pub fn deinit(self: ColumnDescription) void {
-        self.allocator.free(self.field_name);
-    }
 };
 
 pub const CommandComplete = struct {
@@ -220,7 +208,7 @@ const Mechanism = enum {
     }
 };
 
-pub fn read(allocator: Allocator, reader: AnyReader) !Message {
+pub fn read(reader: AnyReader) !Message {
     const message_type = try reader.readByte();
 
     switch (message_type) {
@@ -292,31 +280,41 @@ pub fn read(allocator: Allocator, reader: AnyReader) !Message {
                 // At the moment it presumes it is always in the formatted order
                 .sasl_continue => {
                     const size_of_buffer = size_of_message - 8; // Subtract message length and auth type
-                    const buff = try allocator.alloc(u8, @intCast(size_of_buffer));
 
-                    std.log.debug("size of buffer: {d}", .{size_of_buffer});
+                    // Example value: r=wPQjRfb6FZn3ez5t9gRTVb+G8M+wehfQmvSdbtyW4N0OjVCZ,s=gPc86FtzgE+GNcocleODEQ==,i=4096
+                    // r or nonce is the client sent nonce plus the server sent nonce thus
+                    // r= will always be 24 * 2 or 48 bytes long
+                    // s or encoded salt will always be 24 bytes long 16 decoded
+                    // i will always be 4 bytes long or a u32
+                    var buff: [84]u8 = undefined;
 
-                    _ = try reader.readAtLeast(buff, @intCast(size_of_buffer));
+                    _ = try reader.readAtLeast(&buff, @intCast(size_of_buffer));
 
-                    var fixed_buffer = std.io.fixedBufferStream(buff);
+                    std.log.debug("size of buffer: {s}", .{buff});
+
+                    var fixed_buffer = std.io.fixedBufferStream(&buff);
                     var buffer_reader = fixed_buffer.reader();
 
-                    const nonce_buffer = try buffer_reader.readUntilDelimiterAlloc(allocator, ',', 256);
-                    defer allocator.free(nonce_buffer);
+                    var nonce: [48]u8 = undefined;
+                    var encoded_salt: [24]u8 = undefined;
+                    var iteration_buffer: [4]u8 = undefined;
+                    var salt: [16]u8 = undefined;
 
-                    const encoded_salt = try buffer_reader.readUntilDelimiterAlloc(allocator, ',', 256);
-                    defer allocator.free(encoded_salt);
+                    _ = try buffer_reader.skipBytes(2, .{}); // Skip the r=
+                    _ = try buffer_reader.read(&nonce);
+                    _ = try buffer_reader.skipBytes(1, .{});
 
-                    const iteration_buffer = try buffer_reader.readAllAlloc(allocator, 256);
-                    defer allocator.free(iteration_buffer);
+                    _ = try buffer_reader.skipBytes(2, .{}); // Skip the s=
+                    _ = try buffer_reader.read(&encoded_salt);
+                    _ = try buffer_reader.skipBytes(1, .{});
 
-                    const size_of_salt = try base_64_decoder.calcSizeForSlice(encoded_salt[2..]);
-                    const salt = try allocator.alloc(u8, size_of_salt);
-                    const nonce = try allocator.dupe(u8, nonce_buffer[2..]);
-                    const iteration = try std.fmt.parseInt(i32, iteration_buffer[2..], 10);
+                    _ = try buffer_reader.skipBytes(2, .{}); // Skip the i=
+                    _ = try buffer_reader.read(&iteration_buffer);
 
                     // Decode the salt and fill the salt buffer
-                    try base_64_decoder.decode(salt, encoded_salt[2..]);
+                    try base_64_decoder.decode(&salt, &encoded_salt);
+
+                    const iteration = try std.fmt.parseInt(i32, &iteration_buffer, 10);
 
                     return Message{
                         .authentication_sasl_continue = AuthenticationSASLContinue{
@@ -331,14 +329,11 @@ pub fn read(allocator: Allocator, reader: AnyReader) !Message {
                 // R (Byte1) + Length of message (i32) + 12 (i32) + Byte (N)
                 .sasl_final => {
                     const size_of_buffer = size_of_message - 8; // Subtract message length and auth type
-                    const buff = try allocator.alloc(u8, @intCast(size_of_buffer));
 
-                    _ = try reader.readAtLeast(buff, @intCast(size_of_buffer));
+                    _ = try reader.skipBytes(@intCast(size_of_buffer), .{});
 
                     return Message{
-                        .authentication_sasl_final = AuthenticationSASLFinal{
-                            .response = buff,
-                        },
+                        .authentication_sasl_final = AuthenticationSASLFinal{},
                     };
                 },
             }
@@ -351,47 +346,47 @@ pub fn read(allocator: Allocator, reader: AnyReader) !Message {
             if (code == 0) return Message{
                 .error_response = ErrorResponse{
                     .code = code,
-                    .response = "",
                 },
             };
 
             const size_of_buffer: usize = @intCast(size_of_message - 5); // Subtract message length and 1 byte for code
-            const response = try allocator.alloc(u8, size_of_buffer);
 
-            _ = try reader.readAtLeast(response, size_of_buffer);
+            _ = try reader.skipBytes(size_of_buffer, .{});
 
             return Message{
                 .error_response = ErrorResponse{
                     .code = code,
-                    .response = response,
                 },
             };
         },
         'S' => {
-            const size_of_message = try reader.readInt(i32, .big);
+            @panic("Not yet implemented need a better way of reading without allocations");
+            // const size_of_message = try reader.readInt(i32, .big);
 
-            // TODO: Add PortalSuspended
-            if (size_of_message == 4) @panic("Not yet implemented");
+            // // TODO: Add PortalSuspended
+            // if (size_of_message == 4) @panic("Not yet implemented");
 
-            // Otherwise we are a ParameterStatus message
-            const key = try reader.readUntilDelimiterAlloc(allocator, '\x00', @intCast(size_of_message));
-            const value = try reader.readUntilDelimiterAlloc(allocator, '\x00', @intCast(size_of_message));
+            // // Otherwise we are a ParameterStatus message
+            // const key = try reader.readUntilDelimiterAlloc(allocator, '\x00', @intCast(size_of_message));
+            // const value = try reader.readUntilDelimiterAlloc(allocator, '\x00', @intCast(size_of_message));
 
-            return Message{
-                .parameter_status = ParameterStatus{
-                    .key = key,
-                    .value = value,
-                },
-            };
+            // return Message{
+            //     .parameter_status = ParameterStatus{
+            //         .key = key,
+            //         .value = value,
+            //     },
+            // };
         },
         'T' => {
             _ = try reader.readInt(i32, .big);
             const fields = try reader.readInt(i16, .big);
-            const columns = try allocator.alloc(ColumnDescription, @intCast(fields));
+            var columns = LinkedList(ColumnDescription){};
             const upper_bound: usize = @intCast(fields);
 
-            for (0..upper_bound) |index| {
-                const field_name = try reader.readUntilDelimiterAlloc(allocator, '\x00', 1024);
+            for (0..upper_bound) |_| {
+                var field_name: [64]u8 = undefined;
+                _ = try reader.readUntilDelimiter(&field_name, '\x00');
+
                 const object_id = try reader.readInt(i32, .big);
                 const attribute_id = try reader.readInt(i16, .big);
                 const data_type_id = try reader.readInt(i32, .big);
@@ -400,7 +395,6 @@ pub fn read(allocator: Allocator, reader: AnyReader) !Message {
                 const format_code = try reader.readInt(i16, .big);
 
                 const column = ColumnDescription{
-                    .allocator = allocator,
                     .field_name = field_name,
                     .object_id = object_id,
                     .attribute_id = attribute_id,
@@ -410,12 +404,15 @@ pub fn read(allocator: Allocator, reader: AnyReader) !Message {
                     .format_code = format_code,
                 };
 
-                columns[index] = column;
+                var node = LinkedList(ColumnDescription).Node{
+                    .data = column,
+                };
+
+                columns.prepend(&node);
             }
 
             return Message{
                 .row_description = RowDescription{
-                    .allocator = allocator,
                     .fields = fields,
                     .columns = columns,
                 },
@@ -425,7 +422,7 @@ pub fn read(allocator: Allocator, reader: AnyReader) !Message {
     }
 }
 
-pub fn write(allocator: Allocator, message: Message, writer: AnyWriter) !void {
+pub fn write(message: Message, writer: AnyWriter) !void {
     switch (message) {
         // Length of message (i32) + Protocol version (i32) + List of String String
         .startup_message => |startup_message| {
@@ -462,15 +459,20 @@ pub fn write(allocator: Allocator, message: Message, writer: AnyWriter) !void {
         },
         .sasl_response => |sasl_response| {
             // TODO: Tidy this up and document wtf is going on
-            const unproved = try std.fmt.allocPrint(
-                allocator,
+            var unproved: [57]u8 = undefined;
+
+            _ = try std.fmt.bufPrint(
+                &unproved,
                 "c=biws,r={s}",
                 .{sasl_response.nonce},
             );
-            defer allocator.free(unproved);
 
-            const auth_message = try std.fmt.allocPrint(
-                allocator,
+            const auth_message_len = sasl_response.client_first_message[3..].len + sasl_response.response.len + unproved.len;
+
+            var auth_message: [auth_message_len + 2]u8 = undefined;
+
+            _ = try std.fmt.bufPrint(
+                &auth_message,
                 "{s},{s},{s}",
                 .{
                     sasl_response.client_first_message[3..],
@@ -478,21 +480,20 @@ pub fn write(allocator: Allocator, message: Message, writer: AnyWriter) !void {
                     unproved,
                 },
             );
-            defer allocator.free(auth_message);
 
             const salted_password = blk: {
                 var buf: [32]u8 = undefined;
                 try std.crypto.pwhash.pbkdf2(
                     &buf,
                     sasl_response.password,
-                    sasl_response.salt,
+                    &sasl_response.salt,
                     @intCast(sasl_response.iteration),
                     std.crypto.auth.hmac.sha2.HmacSha256,
                 );
                 break :blk buf;
             };
 
-            const proof = blk: {
+            const proof: [44]u8 = blk: {
                 var client_key: [32]u8 = undefined;
                 std.crypto.auth.hmac.sha2.HmacSha256.create(&client_key, "Client Key", &salted_password);
 
@@ -500,7 +501,7 @@ pub fn write(allocator: Allocator, message: Message, writer: AnyWriter) !void {
                 std.crypto.hash.sha2.Sha256.hash(&client_key, &stored_key, .{});
 
                 var client_signature: [32]u8 = undefined;
-                std.crypto.auth.hmac.sha2.HmacSha256.create(&client_signature, auth_message, &stored_key);
+                std.crypto.auth.hmac.sha2.HmacSha256.create(&client_signature, &auth_message, &stored_key);
 
                 var proof: [32]u8 = undefined;
                 for (client_key, client_signature, 0..) |ck, cs, i| {
@@ -512,18 +513,21 @@ pub fn write(allocator: Allocator, message: Message, writer: AnyWriter) !void {
                 break :blk encoded_proof;
             };
 
-            const str = try std.fmt.allocPrint(allocator, "{s},p={s}", .{ unproved, proof });
-            defer allocator.free(str);
+            var str: [unproved.len + proof.len + 3]u8 = undefined;
+
+            _ = try std.fmt.bufPrint(&str, "{s},p={s}", .{ unproved, proof });
 
             try writer.writeByte('p');
             try writer.writeInt(i32, @intCast(str.len + 4), .big);
-            _ = try writer.write(str);
+            _ = try writer.write(&str);
         },
         .sasl_initial_response => |sasl_initial_response| {
             var payload_len: usize = 9;
 
-            const mechanism = try sasl_initial_response.mechanism.to_string(allocator);
-            defer allocator.free(mechanism);
+            const mechanism = switch (sasl_initial_response.mechanism) {
+                .scram_sha_256 => "SCRAM-SHA-256",
+                .scram_sha_256_plus => "SCRAM-SHA-256-PLUS",
+            };
 
             payload_len += mechanism.len;
             payload_len += sasl_initial_response.client_message.len;
@@ -533,7 +537,7 @@ pub fn write(allocator: Allocator, message: Message, writer: AnyWriter) !void {
             _ = try writer.write(mechanism);
             try writer.writeByte(0);
             try writer.writeInt(u32, @intCast(sasl_initial_response.client_message.len), .big);
-            _ = try writer.write(sasl_initial_response.client_message);
+            _ = try writer.write(&sasl_initial_response.client_message);
         },
         .query => |query| {
             const payload_len = query.statement.len + 5; // 4 bytes for the len
