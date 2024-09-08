@@ -30,321 +30,321 @@ const Eq = enum {
     GT,
 };
 
-const Datetime = struct {
-    years: u16 = 1970,
-    months: u8 = 1,
-    days: u8 = 1,
-    hours: u8 = 0,
-    minutes: u8 = 0,
-    seconds: u8 = 0,
+const Datetime = @This();
 
-    pub fn now() Datetime {
-        return Datetime.from_timestamp(std.time.timestamp());
-    }
+years: u16 = 1970,
+months: u8 = 1,
+days: u8 = 1,
+hours: u8 = 0,
+minutes: u8 = 0,
+seconds: u8 = 0,
 
-    pub fn from_timestamp(stamp: i64) Datetime {
-        // Calculate the number of days since the epoch and adjust by the offset
-        const shifted: i64 = @divFloor(stamp, SECONDS_IN_A_DAY) + DAYS_FROM_1970_TO_0000;
+pub fn now() Datetime {
+    return Datetime.from_timestamp(std.time.timestamp());
+}
 
-        // Determine the 400-year era and day of the era
-        const era: i64 = @divTrunc((if (shifted >= 0) shifted else shifted - DAYS_IN_400_YEARS), DAYS_IN_400_YEARS);
-        const doe: u64 = @intCast(shifted - era * DAYS_IN_400_YEARS);
+pub fn from_timestamp(stamp: i64) Datetime {
+    // Calculate the number of days since the epoch and adjust by the offset
+    const shifted: i64 = @divFloor(stamp, SECONDS_IN_A_DAY) + DAYS_FROM_1970_TO_0000;
 
-        // Calculate the year of the era
-        const yoe: u64 = (doe - doe / 1460 + doe / 36524 - doe / 146096) / DAYS_IN_YEAR;
-        var years: i64 = @as(i64, @intCast(yoe)) + era * 400;
+    // Determine the 400-year era and day of the era
+    const era: i64 = @divTrunc((if (shifted >= 0) shifted else shifted - DAYS_IN_400_YEARS), DAYS_IN_400_YEARS);
+    const doe: u64 = @intCast(shifted - era * DAYS_IN_400_YEARS);
 
-        // Calculate the day of the year and month part
-        const doy: u64 = doe - (DAYS_IN_YEAR * yoe + yoe / 4 - yoe / 100);
-        const mp: u64 = (5 * doy + 2) / 153;
-        const days: u64 = doy - (153 * mp + 2) / 5 + 1;
-        const months: u64 = if (mp < 10) mp + 3 else mp - 9;
+    // Calculate the year of the era
+    const yoe: u64 = (doe - doe / 1460 + doe / 36524 - doe / 146096) / DAYS_IN_YEAR;
+    var years: i64 = @as(i64, @intCast(yoe)) + era * 400;
 
-        // Adjust the year if the month is January or February
-        if (months <= 2) years += 1;
+    // Calculate the day of the year and month part
+    const doy: u64 = doe - (DAYS_IN_YEAR * yoe + yoe / 4 - yoe / 100);
+    const mp: u64 = (5 * doy + 2) / 153;
+    const days: u64 = doy - (153 * mp + 2) / 5 + 1;
+    const months: u64 = if (mp < 10) mp + 3 else mp - 9;
 
-        // Calculate hours, minutes, and seconds
-        const seconds: isize = @mod(stamp, 60);
-        const total_minutes: isize = @divTrunc(stamp, 60);
-        const minutes: isize = @mod(total_minutes, 60);
-        const total_hours: isize = @divTrunc(total_minutes, 60);
-        const hours: isize = @mod(total_hours, 24);
+    // Adjust the year if the month is January or February
+    if (months <= 2) years += 1;
 
-        // Cast years to u64 and truncate to u16 for the struct
-        const years_casted: u64 = @intCast(years);
+    // Calculate hours, minutes, and seconds
+    const seconds: isize = @mod(stamp, 60);
+    const total_minutes: isize = @divTrunc(stamp, 60);
+    const minutes: isize = @mod(total_minutes, 60);
+    const total_hours: isize = @divTrunc(total_minutes, 60);
+    const hours: isize = @mod(total_hours, 24);
 
-        return Datetime{
-            .years = @truncate(years_casted),
-            .months = @truncate(months),
-            .days = @truncate(days),
-            .hours = @truncate(@as(usize, @intCast(hours))),
-            .minutes = @truncate(@as(usize, @intCast(minutes))),
-            .seconds = @truncate(@as(usize, @intCast(seconds))),
-        };
-    }
+    // Cast years to u64 and truncate to u16 for the struct
+    const years_casted: u64 = @intCast(years);
 
-    pub fn to_timestamp(self: Datetime) i64 {
-        const years = @as(i64, @intCast(self.years));
-        const months = @as(u64, @intCast(self.months));
-        const days = @as(u64, @intCast(self.days));
-        const hours = @as(i64, @intCast(self.hours));
-        const minutes = @as(i64, @intCast(self.minutes));
-        const seconds = @as(i64, @intCast(self.seconds));
+    return Datetime{
+        .years = @truncate(years_casted),
+        .months = @truncate(months),
+        .days = @truncate(days),
+        .hours = @truncate(@as(usize, @intCast(hours))),
+        .minutes = @truncate(@as(usize, @intCast(minutes))),
+        .seconds = @truncate(@as(usize, @intCast(seconds))),
+    };
+}
 
-        const y: i64 = if (months <= 2) years - 1 else years;
-        const era: i64 = @divTrunc((if (y >= 0) y else y - 399), 400);
-        const yoe: u64 = @intCast(y - era * 400);
-        const doy: u64 = ((153 * if (months > 2) months - 3 else months + 9) + 2) / 5 + days - 1;
-        const doe: u64 = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+pub fn to_timestamp(self: Datetime) i64 {
+    const years = @as(i64, @intCast(self.years));
+    const months = @as(u64, @intCast(self.months));
+    const days = @as(u64, @intCast(self.days));
+    const hours = @as(i64, @intCast(self.hours));
+    const minutes = @as(i64, @intCast(self.minutes));
+    const seconds = @as(i64, @intCast(self.seconds));
 
-        const days_to_seconds: i64 = 60 * 60 * 24 * (era * 146097 + @as(i64, @intCast(doe)) - 719468);
-        const hours_to_seconds: i64 = hours * 60 * 60;
-        const minutes_to_seconds: i64 = minutes * 60;
+    const y: i64 = if (months <= 2) years - 1 else years;
+    const era: i64 = @divTrunc((if (y >= 0) y else y - 399), 400);
+    const yoe: u64 = @intCast(y - era * 400);
+    const doy: u64 = ((153 * if (months > 2) months - 3 else months + 9) + 2) / 5 + days - 1;
+    const doe: u64 = yoe * 365 + yoe / 4 - yoe / 100 + doy;
 
-        return days_to_seconds + hours_to_seconds + minutes_to_seconds + seconds;
-    }
+    const days_to_seconds: i64 = 60 * 60 * 24 * (era * 146097 + @as(i64, @intCast(doe)) - 719468);
+    const hours_to_seconds: i64 = hours * 60 * 60;
+    const minutes_to_seconds: i64 = minutes * 60;
 
-    pub fn format(self: Datetime, _: anytype, _: anytype, writer: anytype) !void {
-        const formatting = "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z";
-        const args = .{ self.years, self.months, self.days, self.hours, self.minutes, self.seconds };
+    return days_to_seconds + hours_to_seconds + minutes_to_seconds + seconds;
+}
 
-        try writer.print(formatting, args);
-    }
+pub fn format(self: Datetime, _: anytype, _: anytype, writer: anytype) !void {
+    const formatting = "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z";
+    const args = .{ self.years, self.months, self.days, self.hours, self.minutes, self.seconds };
 
-    pub fn parse(input: []const u8) !Datetime {
-        var fixed_reader = std.io.fixedBufferStream(input);
-        var reader = fixed_reader.reader();
+    try writer.print(formatting, args);
+}
 
-        var year_buf: [4]u8 = undefined;
-        var month_buf: [2]u8 = undefined;
-        var day_buf: [2]u8 = undefined;
-        var hours_buf: [2]u8 = undefined;
-        var mins_buf: [2]u8 = undefined;
-        var sec_buf: [2]u8 = undefined;
+pub fn parse(input: []const u8) !Datetime {
+    var fixed_reader = std.io.fixedBufferStream(input);
+    var reader = fixed_reader.reader();
 
-        _ = try reader.readAtLeast(&year_buf, 4);
-        try reader.skipBytes(1, .{});
-        _ = try reader.readAtLeast(&month_buf, 2);
-        try reader.skipBytes(1, .{});
-        _ = try reader.readAtLeast(&day_buf, 2);
-        try reader.skipBytes(1, .{});
-        _ = try reader.readAtLeast(&hours_buf, 2);
-        try reader.skipBytes(1, .{});
-        _ = try reader.readAtLeast(&mins_buf, 2);
-        try reader.skipBytes(1, .{});
-        _ = try reader.readAtLeast(&sec_buf, 2);
+    var year_buf: [4]u8 = undefined;
+    var month_buf: [2]u8 = undefined;
+    var day_buf: [2]u8 = undefined;
+    var hours_buf: [2]u8 = undefined;
+    var mins_buf: [2]u8 = undefined;
+    var sec_buf: [2]u8 = undefined;
 
-        return Datetime{
-            .years = try parseInt(u16, &year_buf, 10),
-            .months = try parseInt(u8, &month_buf, 10),
-            .days = try parseInt(u8, &day_buf, 10),
-            .hours = try parseInt(u8, &hours_buf, 10),
-            .minutes = try parseInt(u8, &mins_buf, 10),
-            .seconds = try parseInt(u8, &sec_buf, 10),
-        };
-    }
+    _ = try reader.readAtLeast(&year_buf, 4);
+    try reader.skipBytes(1, .{});
+    _ = try reader.readAtLeast(&month_buf, 2);
+    try reader.skipBytes(1, .{});
+    _ = try reader.readAtLeast(&day_buf, 2);
+    try reader.skipBytes(1, .{});
+    _ = try reader.readAtLeast(&hours_buf, 2);
+    try reader.skipBytes(1, .{});
+    _ = try reader.readAtLeast(&mins_buf, 2);
+    try reader.skipBytes(1, .{});
+    _ = try reader.readAtLeast(&sec_buf, 2);
 
-    pub fn add_seconds(self: Datetime, seconds: u32) Datetime {
-        var stamp = self.to_timestamp();
+    return Datetime{
+        .years = try parseInt(u16, &year_buf, 10),
+        .months = try parseInt(u8, &month_buf, 10),
+        .days = try parseInt(u8, &day_buf, 10),
+        .hours = try parseInt(u8, &hours_buf, 10),
+        .minutes = try parseInt(u8, &mins_buf, 10),
+        .seconds = try parseInt(u8, &sec_buf, 10),
+    };
+}
 
-        stamp += @as(i32, @intCast(seconds));
+pub fn add_seconds(self: Datetime, seconds: u32) Datetime {
+    var stamp = self.to_timestamp();
 
-        return Datetime.from_timestamp(stamp);
-    }
+    stamp += @as(i32, @intCast(seconds));
 
-    pub fn add_minutes(self: Datetime, minutes: u32) Datetime {
-        return self.add_seconds(minutes * 60);
-    }
+    return Datetime.from_timestamp(stamp);
+}
 
-    pub fn add_hours(self: Datetime, hours: u32) Datetime {
-        return self.add_minutes(hours * 60);
-    }
+pub fn add_minutes(self: Datetime, minutes: u32) Datetime {
+    return self.add_seconds(minutes * 60);
+}
 
-    pub fn add_days(self: Datetime, days: u32) Datetime {
-        return self.add_hours(days * 24);
-    }
+pub fn add_hours(self: Datetime, hours: u32) Datetime {
+    return self.add_minutes(hours * 60);
+}
 
-    pub fn add_months(self: Datetime, months: u32) Datetime {
-        if (months == 0) return self;
+pub fn add_days(self: Datetime, days: u32) Datetime {
+    return self.add_hours(days * 24);
+}
 
-        var days: u32 = 0;
-        var months_to_add = months;
-        var current_year = self.years;
-        var current_month = self.months;
+pub fn add_months(self: Datetime, months: u32) Datetime {
+    if (months == 0) return self;
 
-        while (months_to_add > 0) {
-            days += days_in_month(current_year, current_month);
+    var days: u32 = 0;
+    var months_to_add = months;
+    var current_year = self.years;
+    var current_month = self.months;
 
-            if (current_month + 1 == 13) {
-                current_month = 1;
-                current_year += 1;
-            } else {
-                current_month += 1;
-            }
+    while (months_to_add > 0) {
+        days += days_in_month(current_year, current_month);
 
-            months_to_add -= 1;
-        }
-
-        return self.add_days(days);
-    }
-
-    pub fn add_years(self: Datetime, years: u16) Datetime {
-        if (years == 0) return self;
-
-        var days: u32 = 0;
-        var years_to_add = years;
-        var current_year = self.years;
-
-        while (years_to_add > 0) {
-            days += days_in_year(current_year);
+        if (current_month + 1 == 13) {
+            current_month = 1;
             current_year += 1;
-            years_to_add -= 1;
+        } else {
+            current_month += 1;
         }
 
-        return self.add_days(days);
+        months_to_add -= 1;
     }
 
-    pub fn add(self: Datetime, time_frame: Timeframe) Datetime {
-        return switch (time_frame) {
-            .years => |years| self.add_years(years),
-            .months => |months| self.add_months(months),
-            .days => |days| self.add_days(days),
-            .hours => |hours| self.add_hours(hours),
-            .minutes => |minutes| self.add_minutes(minutes),
-            .seconds => |seconds| self.add_seconds(seconds),
-        };
-    }
-    pub fn subtract_seconds(self: Datetime, seconds: u32) Datetime {
-        var stamp = self.to_timestamp();
+    return self.add_days(days);
+}
 
-        stamp -= @as(i32, @intCast(seconds));
+pub fn add_years(self: Datetime, years: u16) Datetime {
+    if (years == 0) return self;
 
-        return Datetime.from_timestamp(stamp);
+    var days: u32 = 0;
+    var years_to_add = years;
+    var current_year = self.years;
+
+    while (years_to_add > 0) {
+        days += days_in_year(current_year);
+        current_year += 1;
+        years_to_add -= 1;
     }
 
-    pub fn subtract_minutes(self: Datetime, minutes: u32) Datetime {
-        return self.subtract_seconds(minutes * 60);
-    }
+    return self.add_days(days);
+}
 
-    pub fn subtract_hours(self: Datetime, hours: u32) Datetime {
-        return self.subtract_minutes(hours * 60);
-    }
+pub fn add(self: Datetime, time_frame: Timeframe) Datetime {
+    return switch (time_frame) {
+        .years => |years| self.add_years(years),
+        .months => |months| self.add_months(months),
+        .days => |days| self.add_days(days),
+        .hours => |hours| self.add_hours(hours),
+        .minutes => |minutes| self.add_minutes(minutes),
+        .seconds => |seconds| self.add_seconds(seconds),
+    };
+}
+pub fn subtract_seconds(self: Datetime, seconds: u32) Datetime {
+    var stamp = self.to_timestamp();
 
-    pub fn subtract_days(self: Datetime, days: u32) Datetime {
-        return self.subtract_hours(days * 24);
-    }
+    stamp -= @as(i32, @intCast(seconds));
 
-    pub fn subtract_months(self: Datetime, months: u32) Datetime {
-        if (months == 0) return self;
+    return Datetime.from_timestamp(stamp);
+}
 
-        var days: u32 = 0;
-        var months_to_subtract = months;
-        var current_year = self.years;
-        var current_month = self.months;
+pub fn subtract_minutes(self: Datetime, minutes: u32) Datetime {
+    return self.subtract_seconds(minutes * 60);
+}
 
-        while (months_to_subtract > 0) {
-            if (current_month == 1) {
-                current_month = 12;
-                current_year -= 1;
-            } else {
-                current_month -= 1;
-            }
+pub fn subtract_hours(self: Datetime, hours: u32) Datetime {
+    return self.subtract_minutes(hours * 60);
+}
 
-            days += days_in_month(current_year, current_month);
-            months_to_subtract -= 1;
-        }
+pub fn subtract_days(self: Datetime, days: u32) Datetime {
+    return self.subtract_hours(days * 24);
+}
 
-        return self.subtract_days(days);
-    }
+pub fn subtract_months(self: Datetime, months: u32) Datetime {
+    if (months == 0) return self;
 
-    pub fn subtract_years(self: Datetime, years: u16) Datetime {
-        if (years == 0) return self;
+    var days: u32 = 0;
+    var months_to_subtract = months;
+    var current_year = self.years;
+    var current_month = self.months;
 
-        var days: u32 = 0;
-        var years_to_subtract = years;
-        var current_year = self.years;
-
-        while (years_to_subtract > 0) {
+    while (months_to_subtract > 0) {
+        if (current_month == 1) {
+            current_month = 12;
             current_year -= 1;
-            days += days_in_year(current_year);
-            years_to_subtract -= 1;
+        } else {
+            current_month -= 1;
         }
 
-        return self.subtract_days(days);
+        days += days_in_month(current_year, current_month);
+        months_to_subtract -= 1;
     }
 
-    pub fn subtract(self: Datetime, time_frame: Timeframe) Datetime {
-        return switch (time_frame) {
-            .years => |years| self.subtract_years(years),
-            .months => |months| self.subtract_months(months),
-            .days => |days| self.subtract_days(days),
-            .hours => |hours| self.subtract_hours(hours),
-            .minutes => |minutes| self.subtract_minutes(minutes),
-            .seconds => |seconds| self.subtract_seconds(seconds),
-        };
+    return self.subtract_days(days);
+}
+
+pub fn subtract_years(self: Datetime, years: u16) Datetime {
+    if (years == 0) return self;
+
+    var days: u32 = 0;
+    var years_to_subtract = years;
+    var current_year = self.years;
+
+    while (years_to_subtract > 0) {
+        current_year -= 1;
+        days += days_in_year(current_year);
+        years_to_subtract -= 1;
     }
 
-    pub fn compare(self: Datetime, other: Datetime) Eq {
-        if (self.years < other.years) return .LT;
-        if (self.years > other.years) return .GT;
-        if (self.months < other.months) return .LT;
-        if (self.months > other.months) return .GT;
-        if (self.days < other.days) return .LT;
-        if (self.days > other.days) return .GT;
-        if (self.hours < other.hours) return .LT;
-        if (self.hours > other.hours) return .GT;
-        if (self.minutes < other.minutes) return .LT;
-        if (self.minutes > other.minutes) return .GT;
-        if (self.seconds < other.seconds) return .LT;
-        if (self.seconds > other.seconds) return .GT;
-        return .EQ;
+    return self.subtract_days(days);
+}
+
+pub fn subtract(self: Datetime, time_frame: Timeframe) Datetime {
+    return switch (time_frame) {
+        .years => |years| self.subtract_years(years),
+        .months => |months| self.subtract_months(months),
+        .days => |days| self.subtract_days(days),
+        .hours => |hours| self.subtract_hours(hours),
+        .minutes => |minutes| self.subtract_minutes(minutes),
+        .seconds => |seconds| self.subtract_seconds(seconds),
+    };
+}
+
+pub fn compare(self: Datetime, other: Datetime) Eq {
+    if (self.years < other.years) return .LT;
+    if (self.years > other.years) return .GT;
+    if (self.months < other.months) return .LT;
+    if (self.months > other.months) return .GT;
+    if (self.days < other.days) return .LT;
+    if (self.days > other.days) return .GT;
+    if (self.hours < other.hours) return .LT;
+    if (self.hours > other.hours) return .GT;
+    if (self.minutes < other.minutes) return .LT;
+    if (self.minutes > other.minutes) return .GT;
+    if (self.seconds < other.seconds) return .LT;
+    if (self.seconds > other.seconds) return .GT;
+    return .EQ;
+}
+
+pub fn range(allocator: Allocator, options: RangeOptions) !ArrayList(Datetime) {
+    var range_list = ArrayList(Datetime).init(allocator);
+    var current_datetime = options.start_date;
+
+    while (current_datetime.compare(options.end_date) != .GT) {
+        try range_list.append(current_datetime);
+        current_datetime = current_datetime.add(options.step);
     }
 
-    pub fn range(allocator: Allocator, options: RangeOptions) !ArrayList(Datetime) {
-        var range_list = ArrayList(Datetime).init(allocator);
-        var current_datetime = options.start_date;
+    return range_list;
+}
 
-        while (current_datetime.compare(options.end_date) != .GT) {
-            try range_list.append(current_datetime);
-            current_datetime = current_datetime.add(options.step);
-        }
+pub fn jsonStringify(self: Datetime, writer: anytype) !void {
+    try writer.print("\"{}\"", .{self});
+}
 
-        return range_list;
+pub fn jsonParse(allocator: Allocator, scanner: anytype, _: std.json.ParseOptions) !Datetime {
+    const token = try scanner.*.next();
+
+    switch (token) {
+        .string => |value| {
+            return Datetime.parse(value) catch std.json.ParseFromValueError.UnexpectedToken;
+        },
+
+        .partial_string => |value| {
+            const savedValue = try allocator.dupe(u8, value);
+            defer allocator.free(savedValue);
+
+            const next_token = try scanner.*.next();
+
+            switch (next_token) {
+                .string => |next_value| {
+                    const combined = try std.mem.concat(allocator, u8, &[_][]const u8{ savedValue, next_value });
+                    defer allocator.free(combined);
+
+                    return Datetime.parse(combined) catch std.json.ParseFromValueError.UnexpectedToken;
+                },
+                else => {},
+            }
+            return std.json.ParseFromValueError.UnexpectedToken;
+        },
+        else => return std.json.ParseFromValueError.UnexpectedToken,
     }
-
-    pub fn jsonStringify(self: Datetime, writer: anytype) !void {
-        try writer.print("\"{}\"", .{self});
-    }
-
-    pub fn jsonParse(allocator: Allocator, scanner: anytype, _: std.json.ParseOptions) !Datetime {
-        const token = try scanner.*.next();
-
-        switch (token) {
-            .string => |value| {
-                return Datetime.parse(value) catch std.json.ParseFromValueError.UnexpectedToken;
-            },
-
-            .partial_string => |value| {
-                const savedValue = try allocator.dupe(u8, value);
-                defer allocator.free(savedValue);
-
-                const next_token = try scanner.*.next();
-
-                switch (next_token) {
-                    .string => |next_value| {
-                        const combined = try std.mem.concat(allocator, u8, &[_][]const u8{ savedValue, next_value });
-                        defer allocator.free(combined);
-
-                        return Datetime.parse(combined) catch std.json.ParseFromValueError.UnexpectedToken;
-                    },
-                    else => {},
-                }
-                return std.json.ParseFromValueError.UnexpectedToken;
-            },
-            else => return std.json.ParseFromValueError.UnexpectedToken,
-        }
-    }
-};
+}
 
 pub fn is_leap_years(years: u16) bool {
     return years % 4 == 0 and (years % 100 != 0 or years % 400 == 0);

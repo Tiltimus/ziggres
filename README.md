@@ -7,6 +7,7 @@ The objective of this project is to create a trading bot capable of achieving an
 To begin development, several components are missing in the Zig programming language. These include:
 - Datetime functionality
 - Websockets support
+- Database Drivers (Postgres)
 
 While there are existing implementations available for reference, it's crucial to build these functionalities from scratch to gain a deeper understanding of their inner workings.
 
@@ -28,8 +29,16 @@ To enhance trading decisions, machine learning techniques will be employed. Init
 
 This README provides an overview of the trading bot development project, outlining the goals, missing components in Zig, proposed trading strategy, and the machine learning approach to be adopted.
 
+### Postgres Driver TODOs
 
-
+- Prepared statements
+- Sanitizing inputs for normal queries
+- Alternative authentication
+- Listen functionality
+- Insert commands 
+- Properly closing the connection not just force closing
+- Correctly drain if in a data_row / data_reader state and another query is called
+- Write tests
 
 ### DEAD CODE BUT DON'T WANT TO DELETE ###
 
