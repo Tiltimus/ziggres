@@ -93,6 +93,7 @@ pub fn transition(
                 .portal_name = "",
                 .statement_name = "",
                 .parameters = parameters,
+                .allocator = allocator,
             };
 
             try Message.write(

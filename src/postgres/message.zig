@@ -6,11 +6,14 @@ const AnyReader = std.io.AnyReader;
 const AnyWriter = std.io.AnyWriter;
 const Stream = std.net.Stream;
 const LinkedList = std.SinglyLinkedList;
+const ArrayList = std.ArrayList;
 const fixedBuffer = std.io.fixedBufferStream;
 const base_64_decoder = std.base64.standard.Decoder;
 const base_64_encoder = std.base64.standard.Encoder;
 const startsWith = std.mem.startsWith;
 const test_allocator = std.testing.allocator;
+const expect = std.testing.expect;
+const eql = std.mem.eql;
 
 const Message = union(enum) {
     authentication_ok: AuthenticationOk,
@@ -175,6 +178,13 @@ pub const Bind = struct {
     portal_name: []const u8,
     statement_name: []const u8,
     parameters: []?[]const u8,
+    allocator: Allocator,
+
+    pub fn deinit(self: Bind) void {
+        self.allocator.free(self.parameters);
+        self.allocator.free(self.portal_name);
+        self.allocator.free(self.statement_name);
+    }
 };
 
 pub const Parse = struct {
@@ -203,11 +213,18 @@ pub const StartupMessage = struct {
     database: []const u8,
     application_name: []const u8,
     options: StringHashMap = undefined,
+    allocator: Allocator,
+
+    pub fn deinit(self: StartupMessage) void {
+        self.allocator.free(self.application_name);
+        self.allocator.free(self.database);
+        self.allocator.free(self.user);
+    }
 };
 
 pub const ErrorResponse = struct {
     code: u8,
-    response: ?[]u8 = null,
+    response: ?[]const u8 = null,
     allocator: Allocator,
 
     pub fn deint(self: ErrorResponse) void {
@@ -614,10 +631,12 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
             };
         },
         'C' => {
+            // TODO: Update to not use readUntilDelimiter
+            // TODO: Rewrite kinda shit could be cleaner
             const message_length = try reader.readInt(i32, .big);
-            var buffer: [64]u8 = undefined;
+            var buffer: [64]u8 = undefined; // TODO: Change to allocation
             var fixed_buffer = std.io.fixedBufferStream(&buffer);
-            var fixed_reader = fixed_buffer.reader();
+            var fixed_reader = fixed_buffer.reader().any();
 
             for (0..@intCast(message_length - 4)) |index| {
                 const byte = try reader.readByte();
@@ -739,19 +758,73 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
                 };
             }
 
+            if (startsWith(u8, &buffer, "P")) {
+                return Message{
+                    .close = Close{
+                        .target = .{ .portal = try allocator.dupe(u8, buffer[1..@intCast(message_length - 4)]) },
+                    },
+                };
+            }
+
+            if (startsWith(u8, &buffer, "S")) {
+                return Message{
+                    .close = Close{
+                        .target = .{ .statement = try allocator.dupe(u8, buffer[1..@intCast(message_length - 4)]) },
+                    },
+                };
+            }
+
             @panic("Probably haven't implemented CommandComplete string type");
         },
         'D' => {
             const message_len = try reader.readInt(i32, .big);
-            const columns: i16 = try reader.readInt(i16, .big);
 
-            return Message{
-                .data_row = DataRow.NoContextDataRow{
-                    .length = message_len,
-                    .columns = columns,
-                    .reader = reader,
+            const byte = try reader.readByte();
+
+            switch (byte) {
+                'S' => {
+                    const buffer = try allocator.alloc(u8, @intCast(message_len - 6));
+                    var fixed_buffer = fixedBuffer(buffer);
+                    const writer = fixed_buffer.writer();
+
+                    _ = try reader.streamUntilDelimiter(writer, '\x00', null);
+
+                    return Message{
+                        .describe = Describe{
+                            .target = .{ .statement = buffer },
+                        },
+                    };
                 },
-            };
+                'P' => {
+                    const buffer = try allocator.alloc(u8, @intCast(message_len - 6));
+                    var fixed_buffer = fixedBuffer(buffer);
+                    const writer = fixed_buffer.writer();
+
+                    _ = try reader.streamUntilDelimiter(writer, '\x00', null);
+
+                    return Message{
+                        .describe = Describe{
+                            .target = .{ .portal = buffer },
+                        },
+                    };
+                },
+                else => {
+                    var other_col_bytes: [1]u8 = undefined;
+
+                    _ = try reader.read(&other_col_bytes);
+
+                    const columns_count: [2]u8 = .{message_type} ++ other_col_bytes;
+                    const columns: i16 = std.mem.readInt(i16, &columns_count, .big);
+
+                    return Message{
+                        .data_row = DataRow.NoContextDataRow{
+                            .length = message_len,
+                            .columns = columns,
+                            .reader = reader,
+                        },
+                    };
+                },
+            }
         },
         '1' => {
             try reader.skipBytes(4, .{}); // Skip contents
@@ -765,6 +838,13 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
 
             return Message{
                 .bind_complete = BindComplete{},
+            };
+        },
+        '3' => {
+            try reader.skipBytes(4, .{});
+
+            return Message{
+                .close_complete = CloseComplete{},
             };
         },
         't' => {
@@ -808,8 +888,157 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
                 },
             };
         },
-        else => {
+        'B' => {
+            const message_len = try reader.readInt(i32, .big);
+            var buffer = try allocator.alloc(u8, @intCast(message_len));
+            defer allocator.free(buffer);
 
+            var fixed_buffer = fixedBuffer(buffer);
+            const writer = fixed_buffer.writer();
+
+            _ = try reader.streamUntilDelimiter(writer, '\x00', null);
+
+            const portal_name_end = fixed_buffer.pos;
+
+            _ = try reader.streamUntilDelimiter(writer, '\x00', null);
+
+            const statement_name_end = fixed_buffer.pos;
+            const number_of_parameter_codes = try reader.readInt(i16, .big);
+
+            for (0..@intCast(number_of_parameter_codes)) |_| {
+                _ = try reader.skipBytes(2, .{});
+            }
+
+            const number_of_parameters = try reader.readInt(i16, .big);
+
+            var arena_allocator = std.heap.ArenaAllocator.init(allocator);
+            defer arena_allocator.deinit();
+
+            const a_allocator = arena_allocator.allocator();
+            var parameters = ArrayList(?[]const u8).init(a_allocator);
+
+            for (0..@intCast(number_of_parameters)) |_| {
+                const size_of = try reader.readInt(i32, .big);
+
+                if (size_of == -1) {
+                    try parameters.append(null);
+                } else {
+                    const parameter_buffer = try a_allocator.alloc(u8, @intCast(size_of));
+
+                    _ = try reader.readAtLeast(parameter_buffer, @intCast(size_of));
+
+                    try parameters.append(parameter_buffer);
+                }
+            }
+
+            const number_of_parameter_format_codes = try reader.readInt(i16, .big);
+
+            for (0..@intCast(number_of_parameter_format_codes)) |_| {
+                try reader.skipBytes(2, .{});
+            }
+
+            return Message{
+                .bind = Bind{
+                    .parameters = try allocator.dupe(?[]const u8, parameters.items),
+                    .portal_name = try allocator.dupe(u8, buffer[0..portal_name_end]),
+                    .statement_name = try allocator.dupe(u8, buffer[portal_name_end..statement_name_end]),
+                    .allocator = allocator,
+                },
+            };
+        },
+        'd' => {
+            const message_len = try reader.readInt(i32, .big);
+            const data = try allocator.alloc(u8, @intCast(message_len - 4));
+
+            _ = try reader.readAtLeast(data, @intCast(message_len - 4));
+
+            return Message{
+                .copy_data = CopyData{
+                    .data = data,
+                },
+            };
+        },
+        'c' => {
+            try reader.skipBytes(4, .{});
+
+            return Message{
+                .copy_done = CopyDone{},
+            };
+        },
+        'f' => {
+            const message_len = try reader.readInt(i32, .big);
+            const message = try allocator.alloc(u8, @intCast(message_len - 4));
+
+            _ = try reader.readAtLeast(message, @intCast(message_len - 4));
+
+            return Message{
+                .copy_fail = CopyFail{
+                    .message = message,
+                },
+            };
+        },
+        'G' => {
+            _ = try reader.skipBytes(4, .{});
+
+            const format = try reader.readInt(i8, .big);
+            const number_of_cols = try reader.readInt(i16, .big);
+            const cols = try allocator.alloc(i16, @intCast(number_of_cols));
+
+            for (0..@intCast(number_of_cols)) |index| {
+                cols[index] = try reader.readInt(i16, .big);
+            }
+
+            return Message{
+                .copy_in_response = CopyInResponse{
+                    .columns = cols,
+                    .format = format,
+                },
+            };
+        },
+        'H' => {
+            _ = try reader.skipBytes(4, .{});
+
+            const format = try reader.readInt(i8, .big);
+            const number_of_cols = try reader.readInt(i16, .big);
+            const cols = try allocator.alloc(i16, @intCast(number_of_cols));
+
+            for (0..@intCast(number_of_cols)) |index| {
+                cols[index] = try reader.readInt(i16, .big);
+            }
+
+            return Message{
+                .copy_out_response = CopyOutResponse{
+                    .columns = cols,
+                    .format = format,
+                },
+            };
+        },
+        'W' => {
+            _ = try reader.skipBytes(4, .{});
+
+            const format = try reader.readInt(i8, .big);
+            const number_of_cols = try reader.readInt(i16, .big);
+            const cols = try allocator.alloc(i16, @intCast(number_of_cols));
+
+            for (0..@intCast(number_of_cols)) |index| {
+                cols[index] = try reader.readInt(i16, .big);
+            }
+
+            return Message{
+                .copy_both_response = CopyBothResponse{
+                    .columns = cols,
+                    .format = format,
+                },
+            };
+        },
+        'I' => {
+            _ = try reader.skipBytes(4, .{});
+
+            return Message{
+                .empty_query_response = EmptyQueryResponse{},
+            };
+        },
+        else => {
             // Otherwise it is the message length
             var other_len_bytes: [3]u8 = undefined;
 
@@ -821,6 +1050,7 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
             const message_sub_type = try reader.readInt(i32, .big);
 
             switch (message_sub_type) {
+                // Startup
                 196608 => {
                     const buffer = try allocator.alloc(u8, @intCast(message_len));
                     defer allocator.free(buffer);
@@ -845,10 +1075,23 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
                             .application_name = try allocator.dupe(u8, application_name),
                             .database = try allocator.dupe(u8, database),
                             .user = try allocator.dupe(u8, user),
+                            .allocator = allocator,
                         },
                     };
                 },
-                else => @panic("Unexpected message type"),
+                // CancelRequest
+                80877102 => {
+                    const process_id = try reader.readInt(i32, .big);
+                    const secret = try reader.readInt(i32, .big);
+
+                    return Message{
+                        .cancel_request = CancelRequest{
+                            .process_id = process_id,
+                            .secret = secret,
+                        },
+                    };
+                },
+                else => {},
             }
 
             @panic("Unexpected message type, recieved: " ++ .{message_type});
@@ -1078,6 +1321,105 @@ pub fn write(message: Message, writer: AnyWriter) !void {
             try writer.writeInt(i32, backend_key_data.process_id, .big);
             try writer.writeInt(i32, backend_key_data.secret, .big);
         },
+        .cancel_request => |cancel_request| {
+            try writer.writeInt(i32, 16, .big);
+            try writer.writeInt(i32, 80877102, .big);
+            try writer.writeInt(i32, cancel_request.process_id, .big);
+            try writer.writeInt(i32, cancel_request.secret, .big);
+        },
+        .close => |close| {
+            const payload_len = 5 + switch (close.target) {
+                .portal => |portal| portal.len,
+                .statement => |statement| statement.len,
+            };
+
+            try writer.writeByte('C');
+            try writer.writeInt(i32, @intCast(payload_len), .big);
+
+            switch (close.target) {
+                .portal => |portal| {
+                    try writer.writeByte('P');
+                    _ = try writer.write(portal);
+                },
+                .statement => |statement| {
+                    try writer.writeByte('S');
+                    _ = try writer.write(statement);
+                },
+            }
+
+            try writer.writeByte('\x00');
+        },
+        .close_complete => {
+            try writer.writeByte('3');
+            try writer.writeInt(i32, 4, .big);
+        },
+        .copy_data => |copy_data| {
+            const payload_len = copy_data.data.len + 4;
+
+            try writer.writeByte('d');
+            try writer.writeInt(i32, @intCast(payload_len), .big);
+            _ = try writer.write(copy_data.data);
+        },
+        .copy_done => {
+            try writer.writeByte('c');
+            try writer.writeInt(i32, 4, .big);
+        },
+        .copy_fail => |copy_fail| {
+            const payload_len = 4 + copy_fail.message.len;
+
+            try writer.writeByte('f');
+            try writer.writeInt(i32, @intCast(payload_len), .big);
+            _ = try writer.write(copy_fail.message);
+        },
+        .copy_in_response => |copy_in_response| {
+            const payload_len = 7 + copy_in_response.columns.len * 2;
+
+            try writer.writeByte('G');
+            try writer.writeInt(i32, @intCast(payload_len), .big);
+            try writer.writeInt(i8, copy_in_response.format, .big);
+            try writer.writeInt(i16, @intCast(copy_in_response.columns.len), .big);
+
+            for (copy_in_response.columns) |item| {
+                try writer.writeInt(i16, item, .big);
+            }
+        },
+        .copy_out_response => |copy_out_response| {
+            const payload_len = 7 + copy_out_response.columns.len * 2;
+
+            try writer.writeByte('H');
+            try writer.writeInt(i32, @intCast(payload_len), .big);
+            try writer.writeInt(i8, copy_out_response.format, .big);
+            try writer.writeInt(i16, @intCast(copy_out_response.columns.len), .big);
+
+            for (copy_out_response.columns) |item| {
+                try writer.writeInt(i16, item, .big);
+            }
+        },
+        .copy_both_response => |copy_both_response| {
+            const payload_len = 7 + copy_both_response.columns.len * 2;
+
+            try writer.writeByte('W');
+            try writer.writeInt(i32, @intCast(payload_len), .big);
+            try writer.writeInt(i8, copy_both_response.format, .big);
+            try writer.writeInt(i16, @intCast(copy_both_response.columns.len), .big);
+
+            for (copy_both_response.columns) |item| {
+                try writer.writeInt(i16, item, .big);
+            }
+        },
+        .empty_query_response => {
+            try writer.writeByte('I');
+            try writer.writeInt(i32, 4, .big);
+        },
+        .error_response => |error_response| {
+            const payload_len = 5 + if (error_response.response) |response| response.len else 0;
+
+            try writer.writeByte('E');
+            try writer.writeInt(i32, @intCast(payload_len), .big);
+            try writer.writeByte(error_response.code);
+            _ = try writer.write(error_response.response orelse "");
+            try writer.writeByte(0);
+        },
         else => @panic("Either not implemented or not valid"),
     }
 }
@@ -1117,8 +1459,8 @@ test "read write terminate" {
     const message_out = try read(reader, test_allocator);
 
     switch (message_out) {
-        .terminate => try std.testing.expect(std.meta.eql(message_out, message)),
-        else => try std.testing.expect(false),
+        .terminate => try expect(std.meta.eql(message_out, message)),
+        else => try expect(false),
     }
 }
 
@@ -1137,8 +1479,8 @@ test "read write sync" {
     const message_out = try read(reader, test_allocator);
 
     switch (message_out) {
-        .sync => try std.testing.expect(std.meta.eql(message_out, message)),
-        else => try std.testing.expect(false),
+        .sync => try expect(std.meta.eql(message_out, message)),
+        else => try expect(false),
     }
 }
 
@@ -1147,15 +1489,12 @@ test "read write startup" {
     var fixed_buffer = std.io.fixedBufferStream(&buffer);
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
-    var arena = std.heap.ArenaAllocator.init(test_allocator);
-    defer arena.deinit();
-
-    const allocator = arena.allocator();
 
     const expected_startup = StartupMessage{
         .application_name = "test_app",
         .database = "test_database",
         .user = "test_user",
+        .allocator = test_allocator,
     };
 
     const message = Message{ .startup_message = expected_startup };
@@ -1164,15 +1503,17 @@ test "read write startup" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, allocator);
+    const message_out = try read(reader, test_allocator);
 
     switch (message_out) {
         .startup_message => |actual_startup| {
-            try std.testing.expect(std.mem.eql(u8, actual_startup.application_name, expected_startup.application_name));
-            try std.testing.expect(std.mem.eql(u8, actual_startup.database, expected_startup.database));
-            try std.testing.expect(std.mem.eql(u8, actual_startup.user, expected_startup.user));
+            try expect(eql(u8, actual_startup.application_name, expected_startup.application_name));
+            try expect(eql(u8, actual_startup.database, expected_startup.database));
+            try expect(eql(u8, actual_startup.user, expected_startup.user));
+
+            actual_startup.deinit();
         },
-        else => try std.testing.expect(false),
+        else => try expect(false),
     }
 }
 
@@ -1191,24 +1532,33 @@ test "read write backend_key_data" {
     const message_out = try read(reader, test_allocator);
 
     switch (message_out) {
-        .backend_key_data => try std.testing.expect(std.meta.eql(message_out, message)),
-        else => try std.testing.expect(false),
+        .backend_key_data => try expect(std.meta.eql(message_out, message)),
+        else => try expect(false),
     }
 }
 
 test "read write bind" {
-    var buffer: [32]u8 = undefined;
+    var buffer: [256]u8 = undefined;
     var fixed_buffer = std.io.fixedBufferStream(&buffer);
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
-    const actual_bind = Bind{
-        .parameters = undefined,
-        .portal_name = undefined,
-        .statement_name = undefined,
+    var parameters = [_]?[]const u8{
+        "hello", // A valid string slice
+        null, // An empty optional, represented by null
+        "world", // Another valid string slice
+        null, // Another empty optional
+        "zig", // Another valid string slice
     };
 
-    const message = Message{ .bind = actual_bind };
+    const expected_bind = Bind{
+        .parameters = &parameters,
+        .portal_name = "portal_name",
+        .statement_name = "statement_name",
+        .allocator = test_allocator,
+    };
+
+    const message = Message{ .bind = expected_bind };
 
     try write(message, writer);
 
@@ -1217,7 +1567,443 @@ test "read write bind" {
     const message_out = try read(reader, test_allocator);
 
     switch (message_out) {
-        .backend_key_data => try std.testing.expect(std.meta.eql(message_out, message)),
-        else => try std.testing.expect(false),
+        .bind => |actual_bind| {
+            try expect(eql(u8, actual_bind.portal_name, expected_bind.portal_name));
+            try expect(eql(u8, actual_bind.statement_name, expected_bind.statement_name));
+            try expect(actual_bind.parameters.len == expected_bind.parameters.len);
+
+            actual_bind.deinit();
+        },
+        else => try expect(false),
     }
+}
+
+test "read write cancel_request" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const expected_cancel_request = CancelRequest{
+        .process_id = 10,
+        .secret = 7,
+    };
+
+    const message = Message{
+        .cancel_request = expected_cancel_request,
+    };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .cancel_request => |actual_cancel_request| {
+            try expect(actual_cancel_request.process_id == expected_cancel_request.process_id);
+            try expect(actual_cancel_request.secret == expected_cancel_request.secret);
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write close (target = portal)" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const expected_close = Close{
+        .target = .{
+            .portal = "portal",
+        },
+    };
+
+    const message = Message{ .close = expected_close };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .close => |actual_close| {
+            try expect(eql(u8, actual_close.target.portal, expected_close.target.portal));
+
+            test_allocator.free(actual_close.target.portal);
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write close (target = statement)" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const expected_close = Close{
+        .target = .{
+            .statement = "statement",
+        },
+    };
+
+    const message = Message{ .close = expected_close };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .close => |actual_close| {
+            try expect(eql(u8, actual_close.target.statement, expected_close.target.statement));
+
+            test_allocator.free(actual_close.target.statement);
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write close_complete" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const message = Message{ .close_complete = undefined };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .close_complete => try expect(std.meta.eql(message_out, message)),
+        else => try expect(false),
+    }
+}
+
+test "read write copy_data" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const expected_copy_data = CopyData{
+        .data = "Hello World !",
+    };
+
+    const message = Message{ .copy_data = expected_copy_data };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .copy_data => |actual_copy_data| {
+            try expect(eql(u8, actual_copy_data.data, expected_copy_data.data));
+
+            test_allocator.free(actual_copy_data.data);
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write copy_done" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const message = Message{ .copy_done = undefined };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .copy_done => try expect(std.meta.eql(message_out, message)),
+        else => try expect(false),
+    }
+}
+
+test "read write copy_fail" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const expected_copy_fail = CopyFail{
+        .message = "Failed copy !\x00",
+    };
+
+    const message = Message{ .copy_fail = expected_copy_fail };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .copy_fail => |actual_copy_fail| {
+            try expect(eql(u8, actual_copy_fail.message, expected_copy_fail.message));
+
+            test_allocator.free(actual_copy_fail.message);
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write copy_in_response" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const expected_copy_in_response = CopyInResponse{
+        .columns = &.{ 1, 2, 3, 4, 5 },
+        .format = 0,
+    };
+
+    const message = Message{
+        .copy_in_response = expected_copy_in_response,
+    };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .copy_in_response => |actual_copy_in_response| {
+            try expect(expected_copy_in_response.format == actual_copy_in_response.format);
+            try expect(expected_copy_in_response.columns.len == actual_copy_in_response.columns.len);
+
+            test_allocator.free(actual_copy_in_response.columns);
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write copy_out_response" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const expected_copy_out_response = CopyOutResponse{
+        .columns = &.{ 1, 2, 3, 4, 5 },
+        .format = 0,
+    };
+
+    const message = Message{
+        .copy_out_response = expected_copy_out_response,
+    };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .copy_out_response => |actual_copy_out_response| {
+            try expect(expected_copy_out_response.format == actual_copy_out_response.format);
+            try expect(expected_copy_out_response.columns.len == actual_copy_out_response.columns.len);
+
+            test_allocator.free(actual_copy_out_response.columns);
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write copy_both_response" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const expected_copy_both_response = CopyBothResponse{
+        .columns = &.{ 1, 2, 3, 4, 5 },
+        .format = 0,
+    };
+
+    const message = Message{
+        .copy_both_response = expected_copy_both_response,
+    };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .copy_both_response => |actual_copy_both_response| {
+            try expect(expected_copy_both_response.format == actual_copy_both_response.format);
+            try expect(expected_copy_both_response.columns.len == actual_copy_both_response.columns.len);
+
+            test_allocator.free(actual_copy_both_response.columns);
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write describe (target = portal)" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const expected_describe = Describe{
+        .target = .{
+            .portal = "portal",
+        },
+    };
+
+    const message = Message{ .describe = expected_describe };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .describe => |actual_describe| {
+            try expect(eql(u8, actual_describe.target.portal, expected_describe.target.portal));
+
+            test_allocator.free(actual_describe.target.portal);
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write describe (target = statement)" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const expected_describe = Describe{
+        .target = .{
+            .statement = "statement",
+        },
+    };
+
+    const message = Message{ .describe = expected_describe };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .describe => |actual_describe| {
+            try expect(eql(u8, actual_describe.target.statement, expected_describe.target.statement));
+
+            test_allocator.free(actual_describe.target.statement);
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write empty_query_response" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const message = Message{ .empty_query_response = undefined };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .empty_query_response => try expect(std.meta.eql(message_out, message)),
+        else => try expect(false),
+    }
+}
+
+test "read write error_response" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const expected_error_response = ErrorResponse{
+        .allocator = test_allocator,
+        .code = 7,
+        .response = "error response !",
+    };
+
+    const message = Message{ .error_response = expected_error_response };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .error_response => |actual_error_response| {
+            try expect(actual_error_response.code == expected_error_response.code);
+            try expect(eql(u8, actual_error_response.response.?, expected_error_response.response.?));
+
+            actual_error_response.deint();
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write execute" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const expected_execute = Execute{
+        .portal = "portal",
+        .rows = 10,
+    };
+
+    const message = Message{ .execute = expected_execute };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_type = try reader.readByte();
+
+    try expect(message_type == 'E');
+
+    const message_len = try reader.readInt(i32, .big);
+
+    const portal = try test_allocator.alloc(u8, @intCast(message_len - 9));
+    defer test_allocator.free(portal);
+
+    var portal_buffer = fixedBuffer(portal);
+    const portal_writer = portal_buffer.writer();
+
+    _ = try reader.streamUntilDelimiter(portal_writer, '\x00', null);
+
+    const rows = try reader.readInt(i32, .big);
+
+    try expect(eql(u8, portal, expected_execute.portal));
+    try expect(rows == expected_execute.rows);
 }

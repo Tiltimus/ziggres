@@ -59,6 +59,7 @@ pub fn transition(
                 .user = self.connect_info.username,
                 .database = self.connect_info.database,
                 .application_name = self.connect_info.application_name,
+                .allocator = allocator,
             };
 
             try Message.write(
