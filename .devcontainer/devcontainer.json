@@ -5,9 +5,11 @@
     "customizations": {
         "vscode": {
             "settings": {
-                "terminal.integrated.shell.linux": "/bin/bash"
+                "terminal.integrated.shell.linux": "/bin/bash",
+                "zig.path": "/usr/local/bin/zig",
+                "zig.zls.path": "/usr/local/bin/zls"
             },
-            "extensions": ["ziglang.vscode-zig"]
+            "extensions": ["ziglang.vscode-zig", "ritwickdey.LiveServer"]
         }
     },
     "postCreateCommand": "zig version && kcov --version",

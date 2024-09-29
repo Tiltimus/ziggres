@@ -82,12 +82,12 @@ pub const NotificationResponse = struct {
 };
 
 pub const NoticeResponse = struct {
-    response: []const u8,
+    fields: std.AutoHashMap(u8, []const u8),
 };
 
 pub const NegotiateProtocolVersion = struct {
     minor_version: i32,
-    options: [][]const u8,
+    options: ArrayList([]const u8),
 };
 
 pub const GssResponse = struct {
@@ -97,7 +97,7 @@ pub const GssResponse = struct {
 pub const GSSENCRequest = struct {};
 
 pub const FunctionCallResponse = struct {
-    value: []const u8,
+    value: ?[]const u8,
 };
 
 pub const FunctionCall = struct {
@@ -977,6 +977,48 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
                 },
             };
         },
+        'F' => {
+            _ = try reader.readInt(i32, .big);
+            const object_id = try reader.readInt(i32, .big);
+            const number_of_format_codes = try reader.readInt(i16, .big);
+            const format_codes = try allocator.alloc(i16, @intCast(number_of_format_codes));
+            defer allocator.free(format_codes);
+
+            for (0..@intCast(number_of_format_codes)) |index| {
+                format_codes[index] = try reader.readInt(i16, .big);
+            }
+
+            const number_of_arguments = try reader.readInt(i16, .big);
+
+            var arena_allocator = std.heap.ArenaAllocator.init(allocator);
+            defer arena_allocator.deinit();
+
+            const a_allocator = arena_allocator.allocator();
+            var arguments = ArrayList(?[]const u8).init(a_allocator);
+
+            for (0..@intCast(number_of_arguments)) |_| {
+                const size_of = try reader.readInt(i32, .big);
+
+                if (size_of == -1) {
+                    try arguments.append(null);
+                } else {
+                    const parameter_buffer = try a_allocator.alloc(u8, @intCast(size_of));
+
+                    _ = try reader.readAtLeast(parameter_buffer, @intCast(size_of));
+
+                    try arguments.append(parameter_buffer);
+                }
+            }
+
+            _ = try reader.readInt(i16, .big);
+
+            return Message{
+                .function_call = FunctionCall{
+                    .arguments = try allocator.dupe(?[]const u8, arguments.items),
+                    .object_id = object_id,
+                },
+            };
+        },
         'G' => {
             _ = try reader.skipBytes(4, .{});
 
@@ -996,7 +1038,9 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
             };
         },
         'H' => {
-            _ = try reader.skipBytes(4, .{});
+            const message_len = try reader.readInt(i32, .big);
+
+            if (message_len == 4) return Message{ .flush = Flush{} };
 
             const format = try reader.readInt(i8, .big);
             const number_of_cols = try reader.readInt(i16, .big);
@@ -1036,6 +1080,100 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
 
             return Message{
                 .empty_query_response = EmptyQueryResponse{},
+            };
+        },
+        'V' => {
+            try reader.skipBytes(4, .{});
+
+            const value_len = try reader.readInt(i32, .big);
+
+            if (value_len == -1) {
+                return Message{
+                    .function_call_response = FunctionCallResponse{
+                        .value = null,
+                    },
+                };
+            } else {
+                const value: []u8 = try allocator.alloc(u8, @intCast(value_len));
+                _ = try reader.readAtLeast(value, @intCast(value_len));
+
+                return Message{
+                    .function_call_response = FunctionCallResponse{
+                        .value = value,
+                    },
+                };
+            }
+        },
+        'p' => {
+            const message_len = try reader.readInt(i32, .big);
+            const buffer = try allocator.alloc(u8, @intCast(message_len - 4));
+
+            _ = try reader.read(buffer);
+
+            return Message{
+                .gss_response = GssResponse{
+                    .message = buffer,
+                },
+            };
+        },
+        'v' => {
+            const message_len = try reader.readInt(i32, .big);
+            const minior_version = try reader.readInt(i32, .big);
+
+            _ = try reader.readInt(i32, .big);
+
+            var options = ArrayList([]const u8).init(allocator);
+
+            const buffer = try allocator.alloc(u8, @intCast(message_len - 12));
+            defer allocator.free(buffer);
+
+            _ = try reader.read(buffer);
+
+            var split_iterator = std.mem.splitAny(u8, buffer, "\x00");
+
+            while (split_iterator.next()) |value| {
+                if (!eql(u8, "", value)) try options.append(value);
+            }
+
+            return Message{
+                .negotiate_protocol_version = NegotiateProtocolVersion{
+                    .minor_version = minior_version,
+                    .options = options,
+                },
+            };
+        },
+        'N' => {
+            const message_len = try reader.readInt(i32, .big);
+            const buffer = try allocator.alloc(u8, @intCast(message_len - 4));
+            defer allocator.free(buffer);
+
+            _ = try reader.read(buffer);
+
+            var fixed_buffer = fixedBuffer(buffer);
+            const buffer_reader = fixed_buffer.reader().any();
+            var fields = std.AutoHashMap(u8, []const u8).init(allocator);
+
+            // std.log.err("str: {any}", .{buffer});
+
+            while (fixed_buffer.pos != fixed_buffer.buffer.len) {
+                const key = try buffer_reader.readByte();
+
+                if (key == 0) {
+                    try fields.put(key, "");
+                } else {
+                    var arraylist = ArrayList(u8).init(allocator);
+                    defer arraylist.deinit();
+
+                    _ = try buffer_reader.streamUntilDelimiter(arraylist.writer(), '\x00', null);
+
+                    try fields.put(key, arraylist.items);
+                }
+            }
+
+            return Message{
+                .notice_response = NoticeResponse{
+                    .fields = fields,
+                },
             };
         },
         else => {
@@ -1089,6 +1227,12 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
                             .process_id = process_id,
                             .secret = secret,
                         },
+                    };
+                },
+                // GSSENCRequest
+                80877104 => {
+                    return Message{
+                        .gssenc_request = GSSENCRequest{},
                     };
                 },
                 else => {},
@@ -1420,6 +1564,111 @@ pub fn write(message: Message, writer: AnyWriter) !void {
             _ = try writer.write(error_response.response orelse "");
             try writer.writeByte(0);
         },
+        .flush => {
+            try writer.writeByte('H');
+            try writer.writeInt(i32, 4, .big);
+        },
+        .function_call => |function_call| {
+            var payload_len: usize = 14;
+
+            for (function_call.arguments) |param| {
+                payload_len += 4;
+                payload_len += if (param) |value| value.len else 1;
+            }
+
+            try writer.writeByte('F');
+            try writer.writeInt(i32, @intCast(payload_len), .big);
+            try writer.writeInt(i32, function_call.object_id, .big);
+            try writer.writeInt(i16, 0, .big);
+
+            try writer.writeInt(i16, @intCast(function_call.arguments.len), .big);
+
+            for (function_call.arguments) |param| {
+                // Deal with null we write -1
+                if (param) |value| {
+                    try writer.writeInt(i32, @intCast(value.len), .big);
+                    _ = try writer.write(value);
+                } else {
+                    try writer.writeInt(i32, -1, .big);
+                }
+            }
+
+            try writer.writeInt(i16, 0, .big);
+        },
+        .function_call_response => |function_call_response| {
+            const payload_len = 8 + if (function_call_response.value) |value| value.len else 0;
+
+            try writer.writeByte('V');
+            try writer.writeInt(i32, @intCast(payload_len), .big);
+
+            if (function_call_response.value) |value| {
+                try writer.writeInt(i32, @intCast(value.len), .big);
+                _ = try writer.write(value);
+            } else {
+                try writer.writeInt(i32, -1, .big);
+            }
+        },
+        .gssenc_request => {
+            try writer.writeInt(i32, 8, .big);
+            try writer.writeInt(i32, 80877104, .big);
+        },
+        .gss_response => |gss_response| {
+            const payload_len: usize = 4 + gss_response.message.len;
+
+            try writer.writeByte('p');
+            try writer.writeInt(i32, @intCast(payload_len), .big);
+            _ = try writer.write(gss_response.message);
+        },
+        .negotiate_protocol_version => |npv| {
+            var payload_len: usize = 12;
+
+            for (npv.options.items) |option| {
+                payload_len += option.len + 1;
+            }
+
+            try writer.writeByte('v');
+            try writer.writeInt(i32, @intCast(payload_len), .big);
+            try writer.writeInt(i32, npv.minor_version, .big);
+            try writer.writeInt(i32, @intCast(npv.options.items.len), .big);
+
+            for (npv.options.items) |option| {
+                _ = try writer.write(option);
+                try writer.writeByte(0);
+            }
+        },
+        .no_data => {
+            try writer.writeByte('n');
+            try writer.writeInt(i32, 4, .big);
+        },
+        .notice_response => |notice_response| {
+            var payload_len: usize = 4;
+
+            var notice_iterator = notice_response.fields.iterator();
+
+            while (notice_iterator.next()) |item| {
+                if (item.key_ptr.* == 0) {
+                    payload_len += 1; // Just the byte gets added
+                } else {
+                    payload_len += 2 + item.value_ptr.len;
+                }
+            }
+
+            try writer.writeByte('N');
+            try writer.writeInt(i32, @intCast(payload_len), .big);
+
+            notice_iterator = notice_response.fields.iterator();
+
+            while (notice_iterator.next()) |item| {
+                if (item.key_ptr.* == 0) {
+                    try writer.writeByte(item.key_ptr.*);
+                } else {
+                    try writer.writeByte(item.key_ptr.*);
+                    _ = try writer.write(item.value_ptr.*);
+                    try writer.writeByte(0);
+                }
+            }
+        },
+
         else => @panic("Either not implemented or not valid"),
     }
 }
@@ -2006,4 +2255,230 @@ test "read write execute" {
 
     try expect(eql(u8, portal, expected_execute.portal));
     try expect(rows == expected_execute.rows);
+}
+
+test "read write flush" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const message = Message{ .flush = undefined };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .flush => try expect(std.meta.eql(message_out, message)),
+        else => try expect(false),
+    }
+}
+
+test "read write function_call" {
+    var buffer: [128]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    var parameters = [_]?[]const u8{
+        "hello", // A valid string slice
+        null, // An empty optional, represented by null
+        "world", // Another valid string slice
+        null, // Another empty optional
+        "zig", // Another valid string slice
+    };
+
+    const expected_function_call = FunctionCall{
+        .arguments = &parameters,
+        .object_id = 10,
+    };
+
+    const message = Message{ .function_call = expected_function_call };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .function_call => |actual_function_call| {
+            try expect(actual_function_call.arguments.len == expected_function_call.arguments.len);
+            try expect(actual_function_call.object_id == expected_function_call.object_id);
+
+            test_allocator.free(actual_function_call.arguments);
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write function_call_response" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const expect_function_call_response = FunctionCallResponse{
+        .value = "expected_value",
+    };
+
+    const message = Message{ .function_call_response = expect_function_call_response };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .function_call_response => |actual_call_response| {
+            try expect(eql(u8, expect_function_call_response.value.?, actual_call_response.value.?));
+
+            test_allocator.free(actual_call_response.value.?);
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write gssenc_request" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const message = Message{ .gssenc_request = undefined };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .gssenc_request => try expect(std.meta.eql(message_out, message)),
+        else => try expect(false),
+    }
+}
+
+test "read write gss_response" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const expected_gss_response = GssResponse{
+        .message = "Hello World !",
+    };
+
+    const message = Message{ .gss_response = expected_gss_response };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .gss_response => |actual_gss_response| {
+            try expect(eql(u8, expected_gss_response.message, actual_gss_response.message));
+            test_allocator.free(actual_gss_response.message);
+        },
+        else => try expect(false),
+    }
+}
+test "read write negotiate_protocol_version" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    var options = ArrayList([]const u8).init(test_allocator);
+    defer options.deinit();
+
+    _ = try options.append("hello");
+    _ = try options.append("world");
+
+    const expected_npv = NegotiateProtocolVersion{
+        .minor_version = 101,
+        .options = options,
+    };
+
+    const message = Message{ .negotiate_protocol_version = expected_npv };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .negotiate_protocol_version => |actual_npv| {
+            try expect(actual_npv.minor_version == expected_npv.minor_version);
+            try expect(actual_npv.options.items.len == expected_npv.options.items.len);
+
+            actual_npv.options.deinit();
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write no_data" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    const message = Message{ .no_data = undefined };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .no_data => try expect(std.meta.eql(message_out, message)),
+        else => try expect(false),
+    }
+}
+
+test "read write notice_response" {
+    var buffer: [48]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    var fields = std.AutoHashMap(u8, []const u8).init(test_allocator);
+    defer fields.deinit();
+
+    try fields.put(0, ""); // Keys with 0 should be treated specially
+    try fields.put(1, "Hello");
+    try fields.put(2, "Worlds");
+
+    const expected_notice_response = NoticeResponse{
+        .fields = fields,
+    };
+
+    const message = Message{ .notice_response = expected_notice_response };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    var message_out = try read(reader, test_allocator);
+
+    switch (message_out) {
+        .notice_response => |*actual_notice_response| {
+            try expect(actual_notice_response.fields.count() == expected_notice_response.fields.count());
+            try expect(eql(u8, actual_notice_response.fields.get(0).?, expected_notice_response.fields.get(0).?));
+            try expect(eql(u8, actual_notice_response.fields.get(1).?, expected_notice_response.fields.get(1).?));
+            try expect(eql(u8, actual_notice_response.fields.get(2).?, expected_notice_response.fields.get(2).?));
+
+            actual_notice_response.fields.deinit();
+        },
+        else => try expect(false),
+    }
 }

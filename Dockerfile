@@ -39,6 +39,14 @@ RUN git clone https://github.com/SimonKagstrom/kcov.git /tmp/kcov && \
     cmake .. && make && make install && \
     cd / && rm -rf /tmp/kcov
 
+# Install ZLS (Zig Language Server)
+RUN git clone https://github.com/zigtools/zls /tmp/zls && \
+    cd /tmp/zls && \
+    git checkout 0.13.0 && \
+    zig build -Doptimize=ReleaseSafe && \
+    mv ./zig-out/bin/zls /usr/local/bin/zls && \
+    cd / && rm -rf /tmp/zls
+
 # Set Zig as default
 ENV PATH="/opt/zig:${PATH}"
 
