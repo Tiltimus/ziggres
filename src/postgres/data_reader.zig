@@ -1,12 +1,12 @@
 const std = @import("std");
 const Message = @import("./message.zig");
 const DataRow = @import("./data_row.zig");
-const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 const AnyReader = std.io.AnyReader;
 
 const DataReader = @This();
 
-allocator: Allocator,
+arena_allocator: *ArenaAllocator,
 reader: AnyReader,
 state: State,
 context: *anyopaque,
@@ -29,11 +29,11 @@ pub const Event = union(enum) {
 
 pub fn init(
     row_description: Message.RowDescription,
-    allocator: Allocator,
+    arena_allocator: ArenaAllocator,
     reader: AnyReader,
 ) DataReader {
     return DataReader{
-        .allocator = allocator,
+        .allocator = arena_allocator,
         .reader = reader,
         .row_description = row_description,
     };
@@ -72,7 +72,7 @@ pub fn transition(self: *DataReader, event: Event) !void {
         .next => {
             switch (self.state) {
                 .start => {
-                    const message = try Message.read(self.reader, self.allocator);
+                    const message = try Message.read(self.reader, self.arena_allocator);
 
                     switch (message) {
                         .data_row => |no_context_data_row| {
@@ -85,7 +85,7 @@ pub fn transition(self: *DataReader, event: Event) !void {
                             self.state = .{ .data_row = data_row };
                         },
                         .command_complete => |command_complete| {
-                            const next_message = try Message.read(self.reader, self.allocator);
+                            const next_message = try Message.read(self.reader, self.arena_allocator);
 
                             switch (next_message) {
                                 .ready_for_query => {},
@@ -101,7 +101,7 @@ pub fn transition(self: *DataReader, event: Event) !void {
                 .data_row => |*prev_data_row| {
                     try prev_data_row.drain();
 
-                    const message = try Message.read(self.reader, self.allocator);
+                    const message = try Message.read(self.reader, self.arena_allocator);
 
                     switch (message) {
                         .data_row => |no_context_data_row| {
@@ -114,7 +114,7 @@ pub fn transition(self: *DataReader, event: Event) !void {
                             self.state = .{ .data_row = data_row };
                         },
                         .command_complete => |command_complete| {
-                            const next_message = try Message.read(self.reader, self.allocator);
+                            const next_message = try Message.read(self.reader, self.arena_allocator);
 
                             switch (next_message) {
                                 .ready_for_query => {},

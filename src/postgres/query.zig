@@ -1,11 +1,11 @@
 const std = @import("std");
 const Message = @import("./message.zig");
 const DataReader = @import("./data_reader.zig");
-const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 const AnyReader = std.io.AnyReader;
 const AnyWriter = std.io.AnyWriter;
 
-allocator: Allocator,
+arena_allocator: *ArenaAllocator,
 state: State,
 context: *anyopaque,
 send_event: *const fn (context: *anyopaque, event: DataReader.Event) anyerror!void,
@@ -52,7 +52,7 @@ pub const State = union(enum) {
 
 pub fn transition(
     self: *Query,
-    allocator: Allocator,
+    arena_allocator: *ArenaAllocator,
     event: Event,
     reader: AnyReader,
     writer: AnyWriter,
@@ -93,7 +93,6 @@ pub fn transition(
                 .portal_name = "",
                 .statement_name = "",
                 .parameters = parameters,
-                .allocator = allocator,
             };
 
             try Message.write(
@@ -139,7 +138,7 @@ pub fn transition(
             self.state = .{ .sent_describe = undefined };
         },
         .read_parse_complete => {
-            const message = try Message.read(reader, allocator);
+            const message = try Message.read(reader, arena_allocator);
 
             switch (message) {
                 .parse_complete => {
@@ -152,7 +151,7 @@ pub fn transition(
             }
         },
         .read_bind_complete => {
-            const message = try Message.read(reader, allocator);
+            const message = try Message.read(reader, arena_allocator);
 
             switch (message) {
                 .bind_complete => {
@@ -165,7 +164,7 @@ pub fn transition(
             }
         },
         .read_row_description => {
-            const message = try Message.read(reader, allocator);
+            const message = try Message.read(reader, arena_allocator);
 
             switch (message) {
                 .row_description => |row_description| {
@@ -178,7 +177,7 @@ pub fn transition(
             }
         },
         .read_parameter_description => {
-            const message = try Message.read(reader, allocator);
+            const message = try Message.read(reader, arena_allocator);
 
             switch (message) {
                 .parameter_description => |parameter_description| {
@@ -188,7 +187,7 @@ pub fn transition(
             }
         },
         .read_ready_for_query => {
-            const message = try Message.read(reader, allocator);
+            const message = try Message.read(reader, arena_allocator);
 
             switch (message) {
                 .ready_for_query => {
@@ -198,7 +197,7 @@ pub fn transition(
             }
         },
         .read_query_response => {
-            const message = try Message.read(reader, allocator);
+            const message = try Message.read(reader, arena_allocator);
 
             switch (message) {
                 .row_description => |row_description| {
@@ -206,12 +205,12 @@ pub fn transition(
                 },
 
                 .command_complete => |command_complete| {
-                    const next_message = try Message.read(reader, allocator);
+                    const next_message = try Message.read(reader, arena_allocator);
 
                     switch (next_message) {
                         .ready_for_query => {
                             const data_reader = DataReader{
-                                .allocator = self.allocator,
+                                .arena_allocator = self.arena_allocator,
                                 .reader = reader,
                                 .state = .{ .end = command_complete },
                                 .context = self.context,
@@ -232,7 +231,7 @@ pub fn transition(
         },
         .read_data_reader => {
             const data_reader = DataReader{
-                .allocator = self.allocator,
+                .arena_allocator = self.arena_allocator,
                 .reader = reader,
                 .state = .{ .start = undefined },
                 .context = self.context,

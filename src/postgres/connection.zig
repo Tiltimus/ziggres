@@ -24,6 +24,7 @@ const parseIp = std.net.Address.parseIp;
 const Connection = @This();
 
 allocator: Allocator, // TODO: Probably gonna wanna switch out for an arena allocator
+arena_allocator: ArenaAllocator,
 state: State,
 stream: Network.Stream,
 connect_info: ConnectInfo,
@@ -44,11 +45,13 @@ pub fn connect(allocator: Allocator, connect_info: ConnectInfo) !Connection {
 
     const authenticator = Authenticator.init(connect_info);
     const initial_state = State{ .authenticating = authenticator };
+    const arena_allocator = ArenaAllocator.init(allocator);
 
     var connection = Connection{
         .stream = stream,
         .state = initial_state,
         .allocator = allocator,
+        .arena_allocator = arena_allocator,
         .connect_info = connect_info,
     };
 
@@ -111,7 +114,7 @@ pub fn prepare(self: *Connection, statement: []const u8, parameters: anytype) !*
             }
 
             const query_state = Query{
-                .allocator = self.allocator,
+                .arena_allocator = &self.arena_allocator,
                 .state = .parse,
                 .context = @ptrCast(self),
                 .send_event = &send_data_reader_event,
@@ -214,14 +217,17 @@ fn transition(self: *Connection, event: Event) !void {
             switch (self.state) {
                 .authenticating => |*authenticator| {
                     try authenticator.transition(
-                        self.allocator,
+                        &self.arena_allocator,
                         auth_event,
                         reader,
                         writer,
                     );
 
                     switch (authenticator.state) {
-                        .authenticated => self.state = (.{ .ready = undefined }),
+                        .authenticated => {
+                            self.state = (.{ .ready = undefined });
+                            _ = self.arena_allocator.reset(.free_all);
+                        },
                         .error_response => |error_response| self.state = (.{ .error_response = error_response }),
                         else => {},
                     }
@@ -233,14 +239,17 @@ fn transition(self: *Connection, event: Event) !void {
             switch (self.state) {
                 .querying => |*current_query| {
                     try current_query.transition(
-                        self.allocator,
+                        &self.arena_allocator,
                         query_event,
                         reader,
                         writer,
                     );
 
                     switch (current_query.state) {
-                        .command_complete => self.state = (.{ .ready = undefined }),
+                        .command_complete => {
+                            self.state = (.{ .ready = undefined });
+                            _ = self.arena_allocator.reset(.free_all);
+                        },
                         .error_response => |error_response| self.state = (.{ .error_response = error_response }),
                         else => {},
                     }
@@ -252,14 +261,17 @@ fn transition(self: *Connection, event: Event) !void {
             switch (self.state) {
                 .querying => |*current_query| {
                     try current_query.transition(
-                        self.allocator,
+                        &self.arena_allocator,
                         .{ .data_reading = data_reading_event },
                         reader,
                         writer,
                     );
 
                     switch (current_query.state) {
-                        .command_complete => self.state = (.{ .ready = undefined }),
+                        .command_complete => {
+                            self.state = (.{ .ready = undefined });
+                            _ = self.arena_allocator.reset(.free_all);
+                        },
                         .error_response => |error_response| self.state = (.{ .error_response = error_response }),
                         else => {},
                     }
@@ -269,7 +281,7 @@ fn transition(self: *Connection, event: Event) !void {
         },
         .close => {
             _ = try Message.write(.{ .terminate = undefined }, writer);
-
+            _ = self.arena_allocator.reset(.free_all);
             self.state = .{ .closed = undefined };
         },
     }

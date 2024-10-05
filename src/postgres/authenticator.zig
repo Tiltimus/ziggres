@@ -2,6 +2,7 @@ const std = @import("std");
 const Message = @import("./message.zig");
 const ConnectInfo = @import("./connect_info.zig");
 const Allocator = std.mem.Allocator;
+const ArenaAllocator = std.heap.ArenaAllocator;
 const AnyReader = std.io.AnyReader;
 const AnyWriter = std.io.AnyWriter;
 const SASLInitialResponse = Message.SASLInitialResponse;
@@ -48,7 +49,7 @@ pub fn init(connect_info: ConnectInfo) Authenticator {
 
 pub fn transition(
     self: *Authenticator,
-    allocator: Allocator,
+    arena_allocator: *ArenaAllocator,
     event: Event,
     reader: AnyReader,
     writer: AnyWriter,
@@ -59,7 +60,6 @@ pub fn transition(
                 .user = self.connect_info.username,
                 .database = self.connect_info.database,
                 .application_name = self.connect_info.application_name,
-                .allocator = allocator,
             };
 
             try Message.write(
@@ -70,7 +70,7 @@ pub fn transition(
             self.state = .{ .received_authentication = undefined };
         },
         .read_authentication => {
-            const message = try Message.read(reader, allocator);
+            const message = try Message.read(reader, arena_allocator);
 
             switch (message) {
                 .authentication_sasl => |authentication_sasl| {
@@ -102,7 +102,7 @@ pub fn transition(
         .read_sasl_continue => {
             switch (self.state) {
                 .sent_sasl_initial_response => |sasl_initial_response| {
-                    const message = try Message.read(reader, allocator);
+                    const message = try Message.read(reader, arena_allocator);
 
                     switch (message) {
                         .authentication_sasl_continue => |sasl_continue| {
@@ -146,7 +146,7 @@ pub fn transition(
         .read_sasl_final => {
             switch (self.state) {
                 .sent_sasl_response => |_| {
-                    const message = try Message.read(reader, allocator);
+                    const message = try Message.read(reader, arena_allocator);
 
                     switch (message) {
                         .authentication_sasl_final => |final| {
@@ -164,7 +164,7 @@ pub fn transition(
         .read_authentication_ok => {
             switch (self.state) {
                 .received_sasl_final => |_| {
-                    const message = try Message.read(reader, allocator);
+                    const message = try Message.read(reader, arena_allocator);
 
                     switch (message) {
                         .authentication_ok => |_| {

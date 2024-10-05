@@ -5,6 +5,7 @@ const StringHashMap = std.StringHashMap([]const u8);
 const AnyReader = std.io.AnyReader;
 const AnyWriter = std.io.AnyWriter;
 const Stream = std.net.Stream;
+const ArenaAllocator = std.heap.ArenaAllocator;
 const LinkedList = std.SinglyLinkedList;
 const ArrayList = std.ArrayList;
 const fixedBuffer = std.io.fixedBufferStream;
@@ -160,7 +161,6 @@ pub const Terminate = struct {};
 pub const NoData = struct {};
 
 pub const ParameterDescription = struct {
-    parameter_count: i16,
     object_ids: []i32,
 };
 
@@ -178,13 +178,6 @@ pub const Bind = struct {
     portal_name: []const u8,
     statement_name: []const u8,
     parameters: []?[]const u8,
-    allocator: Allocator,
-
-    pub fn deinit(self: Bind) void {
-        self.allocator.free(self.parameters);
-        self.allocator.free(self.portal_name);
-        self.allocator.free(self.statement_name);
-    }
 };
 
 pub const Parse = struct {
@@ -213,25 +206,11 @@ pub const StartupMessage = struct {
     database: []const u8,
     application_name: []const u8,
     options: StringHashMap = undefined,
-    allocator: Allocator,
-
-    pub fn deinit(self: StartupMessage) void {
-        self.allocator.free(self.application_name);
-        self.allocator.free(self.database);
-        self.allocator.free(self.user);
-    }
 };
 
 pub const ErrorResponse = struct {
     code: u8,
     response: ?[]const u8 = null,
-    allocator: Allocator,
-
-    pub fn deint(self: ErrorResponse) void {
-        if (self.response) |response| {
-            self.allocator.free(response);
-        }
-    }
 
     pub fn jsonStringify(self: ErrorResponse, writer: anytype) !void {
         try writer.beginObject();
@@ -247,8 +226,8 @@ pub const ErrorResponse = struct {
 };
 
 pub const ParameterStatus = struct {
-    key: []u8,
-    value: []u8,
+    key: []const u8,
+    value: []const u8,
 };
 
 pub const SASLInitialResponse = struct {
@@ -296,29 +275,7 @@ pub const Query = struct {
 // with an arena possibly
 pub const RowDescription = struct {
     fields: i16,
-    columns: LinkedList(ColumnDescription),
-
-    pub fn get_column(self: RowDescription, index: i16) ?ColumnDescription {
-        var count: i16 = 0;
-        var current_node = self.columns.first;
-
-        while (count != index) {
-            if (current_node) |node| {
-                current_node = node.next;
-            }
-
-            count += 1;
-        }
-
-        if (current_node) |node| return node.data;
-
-        return null;
-    }
-
-    pub fn deinit(self: RowDescription) void {
-        for (self.columns) |col| col.deinit();
-        self.allocator.free(self.columns);
-    }
+    columns: [](ColumnDescription),
 
     pub fn jsonStringify(self: RowDescription, writer: anytype) !void {
         try writer.beginObject();
@@ -331,7 +288,7 @@ pub const RowDescription = struct {
 };
 
 pub const ColumnDescription = struct {
-    field_name: [64]u8,
+    field_name: []const u8,
     object_id: i32,
     attribute_id: i16,
     data_type_id: i32,
@@ -398,7 +355,8 @@ const Mechanism = enum {
     }
 };
 
-pub fn read(reader: AnyReader, allocator: Allocator) !Message {
+pub fn read(reader: AnyReader, arena_allocator: *ArenaAllocator) !Message {
+    var allocator = arena_allocator.allocator();
     const message_type = try reader.readByte();
 
     switch (message_type) {
@@ -534,7 +492,6 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
             if (code == 0) return Message{
                 .error_response = ErrorResponse{
                     .code = code,
-                    .allocator = allocator,
                 },
             };
 
@@ -549,7 +506,6 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
                 .error_response = ErrorResponse{
                     .code = code,
                     .response = buffer,
-                    .allocator = allocator,
                 },
             };
         },
@@ -564,8 +520,14 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
                 };
             }
 
-            const key = "";
-            const value = "";
+            const buffer = try allocator.alloc(u8, @intCast(message_len - 2));
+
+            _ = try reader.read(buffer);
+
+            var iter_split = std.mem.splitAny(u8, buffer, "\x00");
+
+            const key = iter_split.next() orelse "";
+            const value = iter_split.next() orelse "";
 
             return Message{
                 .parameter_status = ParameterStatus{
@@ -575,16 +537,16 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
             };
         },
         'T' => {
+            // TODO: Fix stack variable
             _ = try reader.readInt(i32, .big);
             const fields = try reader.readInt(i16, .big);
-            var columns = LinkedList(ColumnDescription){};
-            const upper_bound: usize = @intCast(fields);
+            var columns = try allocator.alloc(ColumnDescription, @intCast(fields));
 
-            for (0..upper_bound) |_| {
+            for (0..@intCast(fields)) |index| {
                 // TODO: Correctly copy the field_name, is stack allocated
-                var field_name: [64]u8 = undefined;
-                var fixed_buffer = std.io.fixedBufferStream(&field_name);
-                const writer = fixed_buffer.writer();
+
+                var field_name = ArrayList(u8).init(allocator);
+                const writer = field_name.writer().any();
 
                 _ = try reader.streamUntilDelimiter(&writer, '\x00', 64);
 
@@ -596,7 +558,7 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
                 const format_code = try reader.readInt(i16, .big);
 
                 const column = ColumnDescription{
-                    .field_name = field_name,
+                    .field_name = field_name.items,
                     .object_id = object_id,
                     .attribute_id = attribute_id,
                     .data_type_id = data_type_id,
@@ -605,11 +567,7 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
                     .format_code = format_code,
                 };
 
-                var node = LinkedList(ColumnDescription).Node{
-                    .data = column,
-                };
-
-                columns.prepend(&node);
+                columns[index] = column;
             }
 
             return Message{
@@ -635,7 +593,7 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
             // TODO: Rewrite kinda shit could be cleaner
             const message_length = try reader.readInt(i32, .big);
             var buffer: [64]u8 = undefined; // TODO: Change to allocation
-            var fixed_buffer = std.io.fixedBufferStream(&buffer);
+            var fixed_buffer = fixedBuffer(&buffer);
             var fixed_reader = fixed_buffer.reader().any();
 
             for (0..@intCast(message_length - 4)) |index| {
@@ -850,16 +808,17 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
         't' => {
             _ = try reader.readInt(i32, .big);
             const parameter_count = try reader.readInt(i16, .big);
+            const object_ids = try allocator.alloc(i32, @intCast(parameter_count));
 
-            // TODO: for the minute just skip oids pain in the arse
-            for (0..@intCast(parameter_count)) |_| {
-                try reader.skipBytes(4, .{});
+            for (0..@intCast(parameter_count)) |index| {
+                object_ids[index] = try reader.readInt(i32, .big);
             }
 
-            return Message{ .parameter_description = ParameterDescription{
-                .object_ids = &.{},
-                .parameter_count = parameter_count,
-            } };
+            return Message{
+                .parameter_description = ParameterDescription{
+                    .object_ids = object_ids,
+                },
+            };
         },
         'n' => {
             try reader.skipBytes(4, .{});
@@ -891,7 +850,6 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
         'B' => {
             const message_len = try reader.readInt(i32, .big);
             var buffer = try allocator.alloc(u8, @intCast(message_len));
-            defer allocator.free(buffer);
 
             var fixed_buffer = fixedBuffer(buffer);
             const writer = fixed_buffer.writer();
@@ -910,12 +868,7 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
             }
 
             const number_of_parameters = try reader.readInt(i16, .big);
-
-            var arena_allocator = std.heap.ArenaAllocator.init(allocator);
-            defer arena_allocator.deinit();
-
-            const a_allocator = arena_allocator.allocator();
-            var parameters = ArrayList(?[]const u8).init(a_allocator);
+            var parameters = ArrayList(?[]const u8).init(allocator);
 
             for (0..@intCast(number_of_parameters)) |_| {
                 const size_of = try reader.readInt(i32, .big);
@@ -923,7 +876,7 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
                 if (size_of == -1) {
                     try parameters.append(null);
                 } else {
-                    const parameter_buffer = try a_allocator.alloc(u8, @intCast(size_of));
+                    const parameter_buffer = try allocator.alloc(u8, @intCast(size_of));
 
                     _ = try reader.readAtLeast(parameter_buffer, @intCast(size_of));
 
@@ -939,10 +892,9 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
 
             return Message{
                 .bind = Bind{
-                    .parameters = try allocator.dupe(?[]const u8, parameters.items),
-                    .portal_name = try allocator.dupe(u8, buffer[0..portal_name_end]),
-                    .statement_name = try allocator.dupe(u8, buffer[portal_name_end..statement_name_end]),
-                    .allocator = allocator,
+                    .parameters = parameters.items,
+                    .portal_name = buffer[0..portal_name_end],
+                    .statement_name = buffer[portal_name_end..statement_name_end],
                 },
             };
         },
@@ -982,19 +934,13 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
             const object_id = try reader.readInt(i32, .big);
             const number_of_format_codes = try reader.readInt(i16, .big);
             const format_codes = try allocator.alloc(i16, @intCast(number_of_format_codes));
-            defer allocator.free(format_codes);
 
             for (0..@intCast(number_of_format_codes)) |index| {
                 format_codes[index] = try reader.readInt(i16, .big);
             }
 
             const number_of_arguments = try reader.readInt(i16, .big);
-
-            var arena_allocator = std.heap.ArenaAllocator.init(allocator);
-            defer arena_allocator.deinit();
-
-            const a_allocator = arena_allocator.allocator();
-            var arguments = ArrayList(?[]const u8).init(a_allocator);
+            var arguments = ArrayList(?[]const u8).init(allocator);
 
             for (0..@intCast(number_of_arguments)) |_| {
                 const size_of = try reader.readInt(i32, .big);
@@ -1002,7 +948,7 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
                 if (size_of == -1) {
                     try arguments.append(null);
                 } else {
-                    const parameter_buffer = try a_allocator.alloc(u8, @intCast(size_of));
+                    const parameter_buffer = try allocator.alloc(u8, @intCast(size_of));
 
                     _ = try reader.readAtLeast(parameter_buffer, @intCast(size_of));
 
@@ -1125,7 +1071,6 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
             var options = ArrayList([]const u8).init(allocator);
 
             const buffer = try allocator.alloc(u8, @intCast(message_len - 12));
-            defer allocator.free(buffer);
 
             _ = try reader.read(buffer);
 
@@ -1145,15 +1090,12 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
         'N' => {
             const message_len = try reader.readInt(i32, .big);
             const buffer = try allocator.alloc(u8, @intCast(message_len - 4));
-            defer allocator.free(buffer);
 
             _ = try reader.read(buffer);
 
             var fixed_buffer = fixedBuffer(buffer);
             const buffer_reader = fixed_buffer.reader().any();
             var fields = std.AutoHashMap(u8, []const u8).init(allocator);
-
-            // std.log.err("str: {any}", .{buffer});
 
             while (fixed_buffer.pos != fixed_buffer.buffer.len) {
                 const key = try buffer_reader.readByte();
@@ -1162,17 +1104,80 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
                     try fields.put(key, "");
                 } else {
                     var arraylist = ArrayList(u8).init(allocator);
-                    defer arraylist.deinit();
 
                     _ = try buffer_reader.streamUntilDelimiter(arraylist.writer(), '\x00', null);
 
-                    try fields.put(key, arraylist.items);
+                    try fields.put(key, try arraylist.toOwnedSlice());
                 }
             }
 
             return Message{
                 .notice_response = NoticeResponse{
                     .fields = fields,
+                },
+            };
+        },
+        'A' => {
+            const message_len = try reader.readInt(i32, .big);
+            const process_id = try reader.readInt(i32, .big);
+
+            const buffer = try allocator.alloc(u8, @intCast(message_len - 4));
+
+            _ = try reader.read(buffer);
+
+            var split_iter = std.mem.splitAny(u8, buffer, "\x00");
+
+            const channel_name = split_iter.next() orelse "";
+            const payload = split_iter.next() orelse "";
+
+            return Message{
+                .notification_response = NotificationResponse{
+                    .channel_name = channel_name,
+                    .payload = payload,
+                    .process_id = process_id,
+                },
+            };
+        },
+        'P' => {
+            const message_len = try reader.readInt(i32, .big);
+
+            const buffer = try allocator.alloc(u8, @intCast(message_len));
+            var fixed_buffer = fixedBuffer(buffer);
+            const writer = fixed_buffer.writer().any();
+
+            try reader.streamUntilDelimiter(writer, '\x00', null);
+
+            const name = buffer[0..fixed_buffer.pos];
+            const end_name_pos = fixed_buffer.pos;
+
+            try reader.streamUntilDelimiter(writer, '\x00', null);
+
+            const query = buffer[end_name_pos..fixed_buffer.pos];
+
+            const number_of_params = try reader.readInt(i16, .big);
+
+            for (0..@intCast(number_of_params)) |_| {
+                try reader.skipBytes(4, .{});
+            }
+
+            return Message{
+                .parse = Parse{
+                    .name = name,
+                    .query = query,
+                },
+            };
+        },
+        'Q' => {
+            const message_len = try reader.readInt(i32, .big);
+            const statement = try allocator.alloc(u8, @intCast(message_len - 5));
+
+            _ = try reader.read(statement);
+
+            try reader.skipBytes(1, .{});
+
+            return Message{
+                .query = Query{
+                    .statement = statement,
                 },
             };
         },
@@ -1191,13 +1196,11 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
                 // Startup
                 196608 => {
                     const buffer = try allocator.alloc(u8, @intCast(message_len));
-                    defer allocator.free(buffer);
 
                     _ = try reader.read(buffer);
 
                     var split_iter = std.mem.splitAny(u8, buffer, "\x00");
                     var options = StringHashMap.init(allocator);
-                    defer options.deinit();
 
                     while (split_iter.next()) |key| {
                         const value = split_iter.next() orelse "";
@@ -1210,10 +1213,9 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
 
                     return Message{
                         .startup_message = StartupMessage{
-                            .application_name = try allocator.dupe(u8, application_name),
-                            .database = try allocator.dupe(u8, database),
-                            .user = try allocator.dupe(u8, user),
-                            .allocator = allocator,
+                            .application_name = application_name,
+                            .database = database,
+                            .user = user,
                         },
                     };
                 },
@@ -1235,7 +1237,13 @@ pub fn read(reader: AnyReader, allocator: Allocator) !Message {
                         .gssenc_request = GSSENCRequest{},
                     };
                 },
-                else => {},
+                //SSLRequest
+                80877103 => {
+                    return Message{
+                        .ssl_request = SSLRequest{},
+                    };
+                },
+                else => @panic("Unexpected message type"),
             }
 
             @panic("Unexpected message type, recieved: " ++ .{message_type});
@@ -1668,7 +1676,80 @@ pub fn write(message: Message, writer: AnyWriter) !void {
                 }
             }
         },
+        .notification_response => |notification_response| {
+            const payload_len = 10 + notification_response.payload.len + notification_response.payload.len;
 
+            try writer.writeByte('A');
+            try writer.writeInt(i32, @intCast(payload_len), .big);
+            try writer.writeInt(i32, notification_response.process_id, .big);
+            _ = try writer.write(notification_response.channel_name);
+            try writer.writeByte(0);
+            _ = try writer.write(notification_response.payload);
+            try writer.writeByte(0);
+        },
+        .parameter_description => |parameter_description| {
+            const payload_len: i32 = 10;
+
+            try writer.writeByte('t');
+            try writer.writeInt(i32, payload_len, .big);
+            try writer.writeInt(i16, @intCast(parameter_description.object_ids.len), .big);
+
+            for (parameter_description.object_ids) |object_id| {
+                try writer.writeInt(i32, object_id, .big);
+            }
+        },
+        .parameter_status => |parameter_status| {
+            const payload_len = 4 + parameter_status.key.len + parameter_status.value.len;
+
+            try writer.writeByte('S');
+            try writer.writeInt(i32, @intCast(payload_len), .big);
+            _ = try writer.write(parameter_status.key);
+            try writer.writeByte(0);
+            _ = try writer.write(parameter_status.value);
+            try writer.writeByte(0);
+        },
+        .parse_complete => {
+            try writer.writeByte('1');
+            try writer.writeInt(i32, 4, .big);
+        },
+        .password_message => |password_message| {
+            const payload_len = 5 + password_message.password.len;
+
+            try writer.writeByte('p');
+            try writer.writeInt(i32, @intCast(payload_len), .big);
+            _ = try writer.write(password_message.password);
+            try writer.writeByte(0);
+        },
+        .ready_for_query => {
+            try writer.writeByte('Z');
+            try writer.writeInt(i32, 5, .big);
+            try writer.writeByte('I');
+        },
+        .row_description => |row_description| {
+            var payload_len: usize = 6;
+
+            for (row_description.columns) |column| {
+                payload_len += 18 + column.field_name.len;
+            }
+
+            try writer.writeByte('T');
+            try writer.writeInt(i32, @intCast(payload_len), .big);
+            try writer.writeInt(i16, @intCast(row_description.columns.len), .big);
+
+            for (row_description.columns) |column| {
+                _ = try writer.write(column.field_name);
+                try writer.writeInt(i32, column.object_id, .big);
+                try writer.writeInt(i16, column.attribute_id, .big);
+                try writer.writeInt(i32, column.data_type_id, .big);
+                try writer.writeInt(i16, column.data_type_size, .big);
+                try writer.writeInt(i32, column.data_type_modifier, .big);
+                try writer.writeInt(i16, column.format_code, .big);
+            }
+        },
+        .ssl_request => {
+            try writer.writeInt(i32, 8, .big);
+            try writer.writeInt(i32, 80877103, .big);
+        },
         else => @panic("Either not implemented or not valid"),
     }
 }
@@ -1679,13 +1760,16 @@ test "read write authentication_ok" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     const message = Message{ .authentication_ok = undefined };
 
     try write(message, writer);
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .authentication_ok => try std.testing.expect(std.meta.eql(message_out, message)),
@@ -1699,13 +1783,16 @@ test "read write terminate" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     const message = Message{ .terminate = undefined };
 
     try write(message, writer);
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .terminate => try expect(std.meta.eql(message_out, message)),
@@ -1719,13 +1806,16 @@ test "read write sync" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     const message = Message{ .sync = undefined };
 
     try write(message, writer);
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .sync => try expect(std.meta.eql(message_out, message)),
@@ -1739,11 +1829,13 @@ test "read write startup" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     const expected_startup = StartupMessage{
         .application_name = "test_app",
         .database = "test_database",
         .user = "test_user",
-        .allocator = test_allocator,
     };
 
     const message = Message{ .startup_message = expected_startup };
@@ -1752,15 +1844,13 @@ test "read write startup" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .startup_message => |actual_startup| {
             try expect(eql(u8, actual_startup.application_name, expected_startup.application_name));
             try expect(eql(u8, actual_startup.database, expected_startup.database));
             try expect(eql(u8, actual_startup.user, expected_startup.user));
-
-            actual_startup.deinit();
         },
         else => try expect(false),
     }
@@ -1772,13 +1862,16 @@ test "read write backend_key_data" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     const message = Message{ .backend_key_data = undefined };
 
     try write(message, writer);
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .backend_key_data => try expect(std.meta.eql(message_out, message)),
@@ -1792,6 +1885,9 @@ test "read write bind" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     var parameters = [_]?[]const u8{
         "hello", // A valid string slice
         null, // An empty optional, represented by null
@@ -1804,7 +1900,6 @@ test "read write bind" {
         .parameters = &parameters,
         .portal_name = "portal_name",
         .statement_name = "statement_name",
-        .allocator = test_allocator,
     };
 
     const message = Message{ .bind = expected_bind };
@@ -1813,15 +1908,13 @@ test "read write bind" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .bind => |actual_bind| {
             try expect(eql(u8, actual_bind.portal_name, expected_bind.portal_name));
             try expect(eql(u8, actual_bind.statement_name, expected_bind.statement_name));
             try expect(actual_bind.parameters.len == expected_bind.parameters.len);
-
-            actual_bind.deinit();
         },
         else => try expect(false),
     }
@@ -1832,6 +1925,9 @@ test "read write cancel_request" {
     var fixed_buffer = std.io.fixedBufferStream(&buffer);
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
 
     const expected_cancel_request = CancelRequest{
         .process_id = 10,
@@ -1846,7 +1942,7 @@ test "read write cancel_request" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .cancel_request => |actual_cancel_request| {
@@ -1863,6 +1959,9 @@ test "read write close (target = portal)" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     const expected_close = Close{
         .target = .{
             .portal = "portal",
@@ -1875,13 +1974,11 @@ test "read write close (target = portal)" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .close => |actual_close| {
             try expect(eql(u8, actual_close.target.portal, expected_close.target.portal));
-
-            test_allocator.free(actual_close.target.portal);
         },
         else => try expect(false),
     }
@@ -1892,6 +1989,9 @@ test "read write close (target = statement)" {
     var fixed_buffer = std.io.fixedBufferStream(&buffer);
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
 
     const expected_close = Close{
         .target = .{
@@ -1905,13 +2005,11 @@ test "read write close (target = statement)" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .close => |actual_close| {
             try expect(eql(u8, actual_close.target.statement, expected_close.target.statement));
-
-            test_allocator.free(actual_close.target.statement);
         },
         else => try expect(false),
     }
@@ -1923,13 +2021,16 @@ test "read write close_complete" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     const message = Message{ .close_complete = undefined };
 
     try write(message, writer);
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .close_complete => try expect(std.meta.eql(message_out, message)),
@@ -1943,6 +2044,9 @@ test "read write copy_data" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     const expected_copy_data = CopyData{
         .data = "Hello World !",
     };
@@ -1953,13 +2057,11 @@ test "read write copy_data" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .copy_data => |actual_copy_data| {
             try expect(eql(u8, actual_copy_data.data, expected_copy_data.data));
-
-            test_allocator.free(actual_copy_data.data);
         },
         else => try expect(false),
     }
@@ -1971,13 +2073,16 @@ test "read write copy_done" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     const message = Message{ .copy_done = undefined };
 
     try write(message, writer);
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .copy_done => try expect(std.meta.eql(message_out, message)),
@@ -1991,6 +2096,9 @@ test "read write copy_fail" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     const expected_copy_fail = CopyFail{
         .message = "Failed copy !\x00",
     };
@@ -2001,13 +2109,11 @@ test "read write copy_fail" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .copy_fail => |actual_copy_fail| {
             try expect(eql(u8, actual_copy_fail.message, expected_copy_fail.message));
-
-            test_allocator.free(actual_copy_fail.message);
         },
         else => try expect(false),
     }
@@ -2018,6 +2124,9 @@ test "read write copy_in_response" {
     var fixed_buffer = std.io.fixedBufferStream(&buffer);
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
 
     const expected_copy_in_response = CopyInResponse{
         .columns = &.{ 1, 2, 3, 4, 5 },
@@ -2032,14 +2141,12 @@ test "read write copy_in_response" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .copy_in_response => |actual_copy_in_response| {
             try expect(expected_copy_in_response.format == actual_copy_in_response.format);
             try expect(expected_copy_in_response.columns.len == actual_copy_in_response.columns.len);
-
-            test_allocator.free(actual_copy_in_response.columns);
         },
         else => try expect(false),
     }
@@ -2050,6 +2157,9 @@ test "read write copy_out_response" {
     var fixed_buffer = std.io.fixedBufferStream(&buffer);
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
 
     const expected_copy_out_response = CopyOutResponse{
         .columns = &.{ 1, 2, 3, 4, 5 },
@@ -2064,14 +2174,12 @@ test "read write copy_out_response" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .copy_out_response => |actual_copy_out_response| {
             try expect(expected_copy_out_response.format == actual_copy_out_response.format);
             try expect(expected_copy_out_response.columns.len == actual_copy_out_response.columns.len);
-
-            test_allocator.free(actual_copy_out_response.columns);
         },
         else => try expect(false),
     }
@@ -2082,6 +2190,9 @@ test "read write copy_both_response" {
     var fixed_buffer = std.io.fixedBufferStream(&buffer);
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
 
     const expected_copy_both_response = CopyBothResponse{
         .columns = &.{ 1, 2, 3, 4, 5 },
@@ -2096,14 +2207,12 @@ test "read write copy_both_response" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .copy_both_response => |actual_copy_both_response| {
             try expect(expected_copy_both_response.format == actual_copy_both_response.format);
             try expect(expected_copy_both_response.columns.len == actual_copy_both_response.columns.len);
-
-            test_allocator.free(actual_copy_both_response.columns);
         },
         else => try expect(false),
     }
@@ -2114,6 +2223,9 @@ test "read write describe (target = portal)" {
     var fixed_buffer = std.io.fixedBufferStream(&buffer);
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
 
     const expected_describe = Describe{
         .target = .{
@@ -2127,13 +2239,11 @@ test "read write describe (target = portal)" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .describe => |actual_describe| {
             try expect(eql(u8, actual_describe.target.portal, expected_describe.target.portal));
-
-            test_allocator.free(actual_describe.target.portal);
         },
         else => try expect(false),
     }
@@ -2144,6 +2254,9 @@ test "read write describe (target = statement)" {
     var fixed_buffer = std.io.fixedBufferStream(&buffer);
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
 
     const expected_describe = Describe{
         .target = .{
@@ -2157,13 +2270,11 @@ test "read write describe (target = statement)" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .describe => |actual_describe| {
             try expect(eql(u8, actual_describe.target.statement, expected_describe.target.statement));
-
-            test_allocator.free(actual_describe.target.statement);
         },
         else => try expect(false),
     }
@@ -2175,13 +2286,16 @@ test "read write empty_query_response" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     const message = Message{ .empty_query_response = undefined };
 
     try write(message, writer);
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .empty_query_response => try expect(std.meta.eql(message_out, message)),
@@ -2195,8 +2309,10 @@ test "read write error_response" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     const expected_error_response = ErrorResponse{
-        .allocator = test_allocator,
         .code = 7,
         .response = "error response !",
     };
@@ -2207,14 +2323,12 @@ test "read write error_response" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .error_response => |actual_error_response| {
             try expect(actual_error_response.code == expected_error_response.code);
             try expect(eql(u8, actual_error_response.response.?, expected_error_response.response.?));
-
-            actual_error_response.deint();
         },
         else => try expect(false),
     }
@@ -2225,6 +2339,11 @@ test "read write execute" {
     var fixed_buffer = std.io.fixedBufferStream(&buffer);
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
 
     const expected_execute = Execute{
         .portal = "portal",
@@ -2243,8 +2362,7 @@ test "read write execute" {
 
     const message_len = try reader.readInt(i32, .big);
 
-    const portal = try test_allocator.alloc(u8, @intCast(message_len - 9));
-    defer test_allocator.free(portal);
+    const portal = try allocator.alloc(u8, @intCast(message_len - 9));
 
     var portal_buffer = fixedBuffer(portal);
     const portal_writer = portal_buffer.writer();
@@ -2263,13 +2381,16 @@ test "read write flush" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     const message = Message{ .flush = undefined };
 
     try write(message, writer);
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .flush => try expect(std.meta.eql(message_out, message)),
@@ -2282,6 +2403,9 @@ test "read write function_call" {
     var fixed_buffer = std.io.fixedBufferStream(&buffer);
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
 
     var parameters = [_]?[]const u8{
         "hello", // A valid string slice
@@ -2302,14 +2426,12 @@ test "read write function_call" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .function_call => |actual_function_call| {
             try expect(actual_function_call.arguments.len == expected_function_call.arguments.len);
             try expect(actual_function_call.object_id == expected_function_call.object_id);
-
-            test_allocator.free(actual_function_call.arguments);
         },
         else => try expect(false),
     }
@@ -2321,6 +2443,9 @@ test "read write function_call_response" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     const expect_function_call_response = FunctionCallResponse{
         .value = "expected_value",
     };
@@ -2331,13 +2456,11 @@ test "read write function_call_response" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .function_call_response => |actual_call_response| {
             try expect(eql(u8, expect_function_call_response.value.?, actual_call_response.value.?));
-
-            test_allocator.free(actual_call_response.value.?);
         },
         else => try expect(false),
     }
@@ -2349,13 +2472,16 @@ test "read write gssenc_request" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     const message = Message{ .gssenc_request = undefined };
 
     try write(message, writer);
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .gssenc_request => try expect(std.meta.eql(message_out, message)),
@@ -2369,6 +2495,9 @@ test "read write gss_response" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     const expected_gss_response = GssResponse{
         .message = "Hello World !",
     };
@@ -2379,12 +2508,11 @@ test "read write gss_response" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .gss_response => |actual_gss_response| {
             try expect(eql(u8, expected_gss_response.message, actual_gss_response.message));
-            test_allocator.free(actual_gss_response.message);
         },
         else => try expect(false),
     }
@@ -2395,8 +2523,12 @@ test "read write negotiate_protocol_version" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
-    var options = ArrayList([]const u8).init(test_allocator);
-    defer options.deinit();
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    var options = ArrayList([]const u8).init(allocator);
 
     _ = try options.append("hello");
     _ = try options.append("world");
@@ -2412,14 +2544,12 @@ test "read write negotiate_protocol_version" {
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .negotiate_protocol_version => |actual_npv| {
             try expect(actual_npv.minor_version == expected_npv.minor_version);
             try expect(actual_npv.options.items.len == expected_npv.options.items.len);
-
-            actual_npv.options.deinit();
         },
         else => try expect(false),
     }
@@ -2431,13 +2561,16 @@ test "read write no_data" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
     const message = Message{ .no_data = undefined };
 
     try write(message, writer);
 
     fixed_buffer.reset();
 
-    const message_out = try read(reader, test_allocator);
+    const message_out = try read(reader, &arena);
 
     switch (message_out) {
         .no_data => try expect(std.meta.eql(message_out, message)),
@@ -2451,8 +2584,12 @@ test "read write notice_response" {
     const reader = fixed_buffer.reader().any();
     const writer = fixed_buffer.writer().any();
 
-    var fields = std.AutoHashMap(u8, []const u8).init(test_allocator);
-    defer fields.deinit();
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    var fields = std.AutoHashMap(u8, []const u8).init(allocator);
 
     try fields.put(0, ""); // Keys with 0 should be treated specially
     try fields.put(1, "Hello");
@@ -2468,7 +2605,7 @@ test "read write notice_response" {
 
     fixed_buffer.reset();
 
-    var message_out = try read(reader, test_allocator);
+    var message_out = try read(reader, &arena);
 
     switch (message_out) {
         .notice_response => |*actual_notice_response| {
@@ -2476,9 +2613,367 @@ test "read write notice_response" {
             try expect(eql(u8, actual_notice_response.fields.get(0).?, expected_notice_response.fields.get(0).?));
             try expect(eql(u8, actual_notice_response.fields.get(1).?, expected_notice_response.fields.get(1).?));
             try expect(eql(u8, actual_notice_response.fields.get(2).?, expected_notice_response.fields.get(2).?));
-
-            actual_notice_response.fields.deinit();
         },
+        else => try expect(false),
+    }
+}
+
+test "read write notification_response" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
+    const expected_notification_response = NotificationResponse{
+        .channel_name = "channel_name",
+        .payload = "payload",
+        .process_id = 10,
+    };
+
+    const message = Message{ .notification_response = expected_notification_response };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, &arena);
+
+    switch (message_out) {
+        .notification_response => |actual_notification_response| {
+            try expect(eql(u8, actual_notification_response.channel_name, expected_notification_response.channel_name));
+            try expect(eql(u8, actual_notification_response.payload, expected_notification_response.payload));
+            try expect(actual_notification_response.process_id == expected_notification_response.process_id);
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write parameter_description" {
+    var buffer: [128]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
+    var object_ids = [_]i32{ 1, 2, 3, 4, 5, 6, 7 };
+
+    const expected_parameter_description = ParameterDescription{
+        .object_ids = &object_ids,
+    };
+
+    const message = Message{ .parameter_description = expected_parameter_description };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, &arena);
+
+    switch (message_out) {
+        .parameter_description => |actual_parameter_description| {
+            try expect(eql(i32, actual_parameter_description.object_ids, expected_parameter_description.object_ids));
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write parameter_status" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
+    const expected_paramter_status = ParameterStatus{
+        .key = "key",
+        .value = "value",
+    };
+
+    const message = Message{ .parameter_status = expected_paramter_status };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, &arena);
+
+    switch (message_out) {
+        .parameter_status => |actual_parameter_status| {
+            try expect(eql(u8, actual_parameter_status.key, expected_paramter_status.key));
+            try expect(eql(u8, actual_parameter_status.value, expected_paramter_status.value));
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write parse" {
+    var buffer: [128]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
+    const expected_parse = Parse{
+        .name = "name",
+        .query = "SELECT * FROM fake_table",
+    };
+
+    const message = Message{ .parse = expected_parse };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, &arena);
+
+    switch (message_out) {
+        .parse => |actual_parse| {
+            try expect(eql(u8, actual_parse.name, expected_parse.name));
+            try expect(eql(u8, actual_parse.query, expected_parse.query));
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write parse_complete" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
+    const message = Message{ .parse_complete = undefined };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, &arena);
+
+    switch (message_out) {
+        .parse_complete => try expect(std.meta.eql(message_out, message)),
+        else => try expect(false),
+    }
+}
+
+test "read write password_message" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    const expected_password_message = PasswordMessage{
+        .password = "password",
+    };
+
+    const message = Message{ .password_message = expected_password_message };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_type = try reader.readByte();
+
+    try expect(message_type == 'p');
+
+    const message_len = try reader.readInt(i32, .big);
+
+    const password = try allocator.alloc(u8, @intCast(message_len - 5));
+
+    _ = try reader.read(password);
+
+    try expect(eql(u8, password, expected_password_message.password));
+
+    const null_byte = try reader.readByte();
+
+    try expect(null_byte == 0);
+}
+
+test "read write query" {
+    var buffer: [128]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
+    const expected_query = Query{ .statement = "SELECT * FROM magic_table" };
+
+    const message = Message{ .query = expected_query };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, &arena);
+
+    switch (message_out) {
+        .query => |actual_query| {
+            try expect(eql(u8, actual_query.statement, expected_query.statement));
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write ready_for_query" {
+    var buffer: [256]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
+    var columns = [_]ColumnDescription{
+        ColumnDescription{
+            .attribute_id = 0,
+            .data_type_id = 1,
+            .data_type_modifier = 2,
+            .data_type_size = 3,
+            .field_name = "field_name",
+            .format_code = 1,
+            .object_id = 10,
+        },
+    };
+
+    const expected_row_description = RowDescription{
+        .columns = &columns,
+        .fields = 3,
+    };
+
+    const message = Message{ .row_description = expected_row_description };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, &arena);
+
+    switch (message_out) {
+        .row_description => |actual_row_description| {
+            try expect(actual_row_description.columns.len == expected_row_description.columns.len);
+
+            for (actual_row_description.columns, 0..) |actual_column, index| {
+                const expected_col = expected_row_description.columns[index];
+
+                try expect(eql(u8, actual_column.field_name, expected_col.field_name));
+            }
+        },
+        else => try expect(false),
+    }
+}
+
+test "read write sasl_initial_response" {
+    var buffer: [128]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    const expected_inital_response = try SASLInitialResponse.init(.scram_sha_256);
+
+    const message = Message{ .sasl_initial_response = expected_inital_response };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_type = try reader.readByte();
+
+    try expect(message_type == 'p');
+
+    _ = try reader.readInt(i32, .big);
+
+    var mechanism: [13]u8 = undefined;
+
+    _ = try reader.read(&mechanism);
+
+    try expect(Mechanism.from_string(&mechanism) == .scram_sha_256);
+
+    try reader.skipBytes(1, .{});
+
+    const len_of_sasl = try reader.readInt(i32, .big);
+
+    const client_message = try allocator.alloc(u8, @intCast(len_of_sasl));
+
+    _ = try reader.read(client_message);
+
+    try expect(eql(u8, client_message, &expected_inital_response.client_message));
+}
+
+test "read write sasl_response" {
+    var buffer: [128]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
+    const expected_response = SASLResponse{
+        .nonce = .{ 78, 105, 115, 98, 71, 117, 101, 76, 73, 97, 88, 121, 90, 112, 122, 66, 56, 106, 65, 107, 85, 74, 102, 74, 83, 79, 75, 67, 100, 100, 88, 50, 75, 68, 97, 106, 68, 70, 102, 83, 102, 67, 70, 55, 122, 111, 74, 113 },
+        .salt = .{ 128, 247, 60, 232, 91, 115, 128, 79, 134, 53, 202, 28, 149, 227, 131, 17 },
+        .iteration = 4096,
+        .response = .{ 114, 61, 78, 105, 115, 98, 71, 117, 101, 76, 73, 97, 88, 121, 90, 112, 122, 66, 56, 106, 65, 107, 85, 74, 102, 74, 83, 79, 75, 67, 100, 100, 88, 50, 75, 68, 97, 106, 68, 70, 102, 83, 102, 67, 70, 55, 122, 111, 74, 113, 44, 115, 61, 103, 80, 99, 56, 54, 70, 116, 122, 103, 69, 43, 71, 78, 99, 111, 99, 108, 101, 79, 68, 69, 81, 61, 61, 44, 105, 61, 52, 48, 57, 54 },
+        .password = "[password]",
+        .client_first_message = .{ 110, 44, 44, 110, 61, 44, 114, 61, 78, 105, 115, 98, 71, 117, 101, 76, 73, 97, 88, 121, 90, 112, 122, 66, 56, 106, 65, 107, 85, 74, 102, 74 },
+    };
+
+    const message = Message{ .sasl_response = expected_response };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_type = try reader.readByte();
+
+    try expect(message_type == 'p');
+
+    const message_len = try reader.readInt(i32, .big);
+
+    try reader.skipBytes(@intCast(message_len - 4), .{});
+}
+
+test "read write ssl_request" {
+    var buffer: [32]u8 = undefined;
+    var fixed_buffer = std.io.fixedBufferStream(&buffer);
+    const reader = fixed_buffer.reader().any();
+    const writer = fixed_buffer.writer().any();
+
+    var arena = ArenaAllocator.init(test_allocator);
+    defer arena.deinit();
+
+    const message = Message{ .ssl_request = undefined };
+
+    try write(message, writer);
+
+    fixed_buffer.reset();
+
+    const message_out = try read(reader, &arena);
+
+    switch (message_out) {
+        .ssl_request => try expect(std.meta.eql(message_out, message)),
         else => try expect(false),
     }
 }

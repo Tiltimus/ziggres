@@ -11,6 +11,9 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
 
+    // var buffer: [4096]u8 = undefined;
+    // var fixed = std.heap.FixedBufferAllocator.init(&buffer);
+
     const allocator = gpa.allocator();
     const connect_info = .{
         .host = "127.0.0.1",
@@ -21,7 +24,6 @@ pub fn main() !void {
     };
 
     var connection = try Connection.connect(allocator, connect_info);
-    defer connection.close();
 
     var timer = try std.time.Timer.start();
 
@@ -39,6 +41,8 @@ pub fn main() !void {
 
         std.log.debug("Something: {any}", .{something});
     }
+
+    connection.close();
 
     const lap = timer.lap();
 
