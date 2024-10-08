@@ -317,6 +317,7 @@ pub const CommandType = enum {
     move,
     fetch,
     copy,
+    listen,
 };
 
 pub const AuthenticationType = enum(i32) {
@@ -613,6 +614,7 @@ pub fn read(reader: AnyReader, arena_allocator: *ArenaAllocator) !Message {
                 for (0..oid_buffer.len - 1) |index| {
                     if (oid_buffer[index] == 170) break;
                     if (oid_buffer[index] == 32) break;
+                    if (rows_buffer[index] == 0) break;
 
                     end_oid_pos += 1;
                 }
@@ -622,6 +624,7 @@ pub fn read(reader: AnyReader, arena_allocator: *ArenaAllocator) !Message {
                 for (0..rows_buffer.len - 1) |index| {
                     if (rows_buffer[index] == 170) break;
                     if (rows_buffer[index] == 32) break;
+                    if (rows_buffer[index] == 0) break;
 
                     end_row_pos += 1;
                 }
@@ -716,6 +719,16 @@ pub fn read(reader: AnyReader, arena_allocator: *ArenaAllocator) !Message {
                 };
             }
 
+            if (startsWith(u8, &buffer, "LISTEN")) {
+                return Message{
+                    .command_complete = CommandComplete{
+                        .command = .listen,
+                        .oid = 0,
+                        .rows = 0,
+                    },
+                };
+            }
+
             if (startsWith(u8, &buffer, "P")) {
                 return Message{
                     .close = Close{
@@ -732,7 +745,7 @@ pub fn read(reader: AnyReader, arena_allocator: *ArenaAllocator) !Message {
                 };
             }
 
-            @panic("Probably haven't implemented CommandComplete string type");
+            @panic("Probably haven't implemented CommandComplete string type: " ++ buffer);
         },
         'D' => {
             const message_len = try reader.readInt(i32, .big);
@@ -771,7 +784,7 @@ pub fn read(reader: AnyReader, arena_allocator: *ArenaAllocator) !Message {
 
                     _ = try reader.read(&other_col_bytes);
 
-                    const columns_count: [2]u8 = .{message_type} ++ other_col_bytes;
+                    const columns_count: [2]u8 = .{byte} ++ other_col_bytes;
                     const columns: i16 = std.mem.readInt(i16, &columns_count, .big);
 
                     return Message{

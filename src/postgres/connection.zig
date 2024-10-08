@@ -140,6 +140,23 @@ pub fn prepare(self: *Connection, statement: []const u8, parameters: anytype) !*
                 else => unreachable,
             }
         },
+        .querying => |*current_query| {
+            switch (current_query.state) {
+                .data_reader => |*data_reader| {
+
+                    // Drain current data_reader and ensure stream has been cleared
+                    try data_reader.drain();
+
+                    // Set state ready
+                    self.state = .{ .ready = undefined };
+
+                    // Recursive call probably better way to write it but too much haskell brain
+                    return self.prepare(statement, parameters);
+                },
+                // .error_response => |error_response| self.state = (.{ .error_response = error_response }),
+                else => unreachable,
+            }
+        },
         else => unreachable,
     }
 }
@@ -198,10 +215,6 @@ pub fn query(self: *Connection, statement: []const u8) !*DataReader {
 }
 
 fn transition(self: *Connection, event: Event) !void {
-    const stdout = std.io.getStdOut();
-    const stdout_writer = stdout.writer().any();
-    const datetime = Datetime.now();
-
     const reader = AnyReader{
         .context = @ptrCast(&self.stream),
         .readFn = &stream_read,
@@ -254,7 +267,11 @@ fn transition(self: *Connection, event: Event) !void {
                         else => {},
                     }
                 },
-                else => unreachable,
+                else => {
+                    const allocator = self.arena_allocator.allocator();
+
+                    @panic(try std.fmt.allocPrint(allocator, "Unexpected state: {s}", .{self.state}));
+                },
             }
         },
         .data_reading => |data_reading_event| {
@@ -286,8 +303,10 @@ fn transition(self: *Connection, event: Event) !void {
         },
     }
 
-    try stdout_writer.print("[{}]{s}\n", .{ datetime, event });
-    try stdout_writer.print("[{}]{s}\n", .{ datetime, self.state });
+    if (self.connect_info.diagnostics) |diagnostics| {
+        try diagnostics.log(.{event});
+        try diagnostics.log(.{self.state});
+    }
 }
 
 fn send_data_reader_event(ptr: *anyopaque, event: DataReader.Event) !void {
