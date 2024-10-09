@@ -4,48 +4,74 @@ const ConnectInfo = @import("./connect_info.zig");
 const Message = @import("./message.zig");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
+const AnyReader = std.io.AnyReader;
 
 const Listener = @This();
 
-connection: Connection,
+reader: AnyReader,
+context: *anyopaque,
+send_event: SendEvent,
+state: State = .{ .idle = undefined },
 
-pub fn init(allocator: Allocator, statement: []const u8, connect_info: ConnectInfo) !Listener {
-    var connection = try Connection.connect(allocator, connect_info);
+pub const SendEvent = *const fn (context: *anyopaque, event: Event) anyerror!void;
 
-    var data_reader = try connection.prepare(statement, .{});
+pub const State = union(enum) {
+    idle: void,
+    listening: void,
 
-    try data_reader.drain();
+    pub fn jsonStringify(_: State, writer: anytype) !void {
+        try writer.beginObject();
 
-    return Listener{
-        .connection = connection,
-    };
-}
-
-pub fn listen(self: *Listener, allocator: Allocator, func: *const fn (event: Event) anyerror!void) !void {
-    while (true) {
-        const reader = self.connection.stream.reader().any();
-        var arena_allocator = ArenaAllocator.init(allocator);
-        const message = try Message.read(reader, &arena_allocator);
-
-        switch (message) {
-            .notification_response => |notification_response| {
-                const event = Event{
-                    .arena_allocator = arena_allocator,
-                    .message = notification_response,
-                };
-
-                try func(event);
-            },
-            else => unreachable,
-        }
-    }
-}
-
-pub const Event = struct {
-    arena_allocator: ArenaAllocator,
-    message: Message.NotificationResponse,
-
-    pub fn deinit(self: Event) void {
-        self.arena_allocator.deinit();
+        try writer.endObject();
     }
 };
+
+pub const Event = union(enum) {
+    listen: Listen,
+
+    pub fn jsonStringify(_: Event, writer: anytype) !void {
+        try writer.beginObject();
+
+        try writer.endObject();
+    }
+};
+
+pub const Listen = struct {
+    allocator: Allocator,
+    func: *const fn (event: Message.NotificationResponse) anyerror!void,
+};
+
+pub fn transition(self: *Listener, event: Event) !void {
+    switch (event) {
+        .listen => |listen| {
+            var arena_allocator = ArenaAllocator.init(listen.allocator);
+            defer arena_allocator.deinit();
+
+            const message = try Message.read(self.reader, &arena_allocator);
+
+            switch (message) {
+                .notification_response => |notification_response| {
+                    try listen.func(notification_response);
+                },
+                else => unreachable,
+            }
+        },
+    }
+}
+
+pub fn on_message(self: *Listener, allocator: Allocator, func: *const fn (event: Message.NotificationResponse) anyerror!void) !void {
+    while (self.state == .listening) {
+        try self.send_event(self.context, .{
+            .listen = Listen{
+                .allocator = allocator,
+                .func = func,
+            },
+        });
+    }
+}
+
+pub fn jsonStringify(_: Listener, writer: anytype) !void {
+    try writer.beginObject();
+
+    try writer.endObject();
+}

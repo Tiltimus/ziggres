@@ -2,6 +2,7 @@ const std = @import("std");
 const Connection = @import("./postgres/connection.zig");
 const Diagnostics = @import("./postgres/diagnostics.zig");
 const Listener = @import("./postgres/listener.zig");
+const Message = @import("./postgres/message.zig");
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const ConnectInfo = Connection.ConnectInfo;
@@ -25,16 +26,10 @@ pub fn main() !void {
         .diagnostics = Diagnostics.init(),
     };
 
-    var listener = try Listener.init(
-        allocator,
-        "LISTEN table_change",
-        connect_info,
-    );
+    var connection = try Connection.connect(allocator, connect_info);
+    defer connection.close();
 
-    try listener.listen(allocator, &exec);
-
-    // var connection = try Connection.connect(allocator, connect_info);
-    // defer connection.close();
+    try connection.listen("LISTEN table_change", &exec);
 
     // var data_reader = try connection.prepare("LISTEN table_change", .{});
 
@@ -49,10 +44,7 @@ pub fn main() !void {
     // }
 }
 
-fn exec(event: Listener.Event) !void {
-    std.log.debug("Message Payload: {s}", .{event.message.payload});
-    event.deinit();
-}
+fn exec(_: Message.NotificationResponse) !void {}
 
 test "basic crud" {
     const TestTableRow = struct {

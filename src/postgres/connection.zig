@@ -5,6 +5,7 @@ const DataRow = @import("./data_row.zig");
 const Message = @import("./message.zig");
 const ConnectInfo = @import("./connect_info.zig");
 const DataReader = @import("./data_reader.zig");
+const Listener = @import("./listener.zig");
 const Types = @import("./types.zig");
 const Datetime = @import("../datetime.zig");
 const Network = std.net;
@@ -214,6 +215,38 @@ pub fn query(self: *Connection, statement: []const u8) !*DataReader {
     unreachable;
 }
 
+pub fn listen(self: *Connection, statement: []const u8, func: *const fn (event: Message.NotificationResponse) anyerror!void) !void {
+    switch (self.state) {
+        .ready => {
+            var data_reader = try self.prepare(statement, .{});
+
+            try data_reader.drain();
+
+            const reader = AnyReader{
+                .context = @ptrCast(&self.stream),
+                .readFn = &stream_read,
+            };
+
+            const listener = Listener{
+                .context = @ptrCast(self),
+                .reader = reader,
+                .send_event = &send_listening_event,
+                .state = .{ .listening = undefined },
+            };
+
+            self.state = .{ .listening = listener };
+
+            switch (self.state) {
+                .listening => |*listening| {
+                    try listening.on_message(self.allocator, func);
+                },
+                else => unreachable,
+            }
+        },
+        else => unreachable,
+    }
+}
+
 fn transition(self: *Connection, event: Event) !void {
     const reader = AnyReader{
         .context = @ptrCast(&self.stream),
@@ -296,6 +329,14 @@ fn transition(self: *Connection, event: Event) !void {
                 else => unreachable,
             }
         },
+        .listening => |listener_event| {
+            switch (self.state) {
+                .listening => |*listener| {
+                    try listener.transition(listener_event);
+                },
+                else => unreachable,
+            }
+        },
         .close => {
             _ = try Message.write(.{ .terminate = undefined }, writer);
             _ = self.arena_allocator.reset(.free_all);
@@ -315,10 +356,17 @@ fn send_data_reader_event(ptr: *anyopaque, event: DataReader.Event) !void {
     try connection.transition(.{ .data_reading = event });
 }
 
+fn send_listening_event(ptr: *anyopaque, event: Listener.Event) !void {
+    var connection: *Connection = @alignCast(@ptrCast(ptr));
+
+    try connection.transition(.{ .listening = event });
+}
+
 pub const Event = union(enum) {
     authenticator: Authenticator.Event,
     querying: Query.Event,
     data_reading: DataReader.Event,
+    listening: Listener.Event,
     close: void,
 
     pub fn format(self: Event, _: anytype, _: anytype, writer: anytype) !void {
@@ -332,6 +380,7 @@ pub const State = union(enum) {
     querying: Query,
     ready: void,
     closed: void,
+    listening: Listener,
     error_response: Message.ErrorResponse,
 
     pub fn format(self: State, _: anytype, _: anytype, writer: anytype) !void {
@@ -350,6 +399,9 @@ pub const State = union(enum) {
                 try Json.stringify(current_query.state, .{}, writer);
             },
             .ready => {
+                try Json.stringify(@tagName(self), .{}, writer);
+            },
+            .listening => {
                 try Json.stringify(@tagName(self), .{}, writer);
             },
             .closed => {
