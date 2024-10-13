@@ -1,13 +1,13 @@
 const std = @import("std");
-const Authenticator = @import("./authenticator.zig");
-const Query = @import("./query.zig");
-const DataRow = @import("./data_row.zig");
-const Message = @import("./message.zig");
-const ConnectInfo = @import("./connect_info.zig");
-const DataReader = @import("./data_reader.zig");
-const Listener = @import("./listener.zig");
-const Types = @import("./types.zig");
-const Datetime = @import("../datetime.zig");
+const Authenticator = @import("authenticator.zig");
+const Query = @import("query.zig");
+const DataRow = @import("data_row.zig");
+const Message = @import("message.zig");
+const ConnectInfo = @import("connect_info.zig");
+const DataReader = @import("data_reader.zig");
+const Listener = @import("listener.zig");
+const Types = @import("types.zig");
+const Datetime = @import("datetime.zig");
 const Network = std.net;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -17,14 +17,9 @@ const Json = std.json;
 const ArrayList = std.ArrayList;
 const parseIp = std.net.Address.parseIp;
 
-// TODO: I've done the event stuff wrong, need to pull everything to this level
-// Then have it transition at this level otherwise it will incorrectly log
-// As it is recursively calling the transition without breaking out
-// Logic should be sound just needs moving about
-
 const Connection = @This();
 
-allocator: Allocator, // TODO: Probably gonna wanna switch out for an arena allocator
+allocator: Allocator,
 arena_allocator: ArenaAllocator,
 state: State,
 stream: Network.Stream,

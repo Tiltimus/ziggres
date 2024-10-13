@@ -1,4 +1,4 @@
-const Diagnostics = @import("./diagnostics.zig");
+const Diagnostics = @import("diagnostics.zig");
 
 const ConnectInfo = @This();
 

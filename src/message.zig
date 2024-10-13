@@ -1,5 +1,5 @@
 const std = @import("std");
-const DataRow = @import("./data_row.zig");
+const DataRow = @import("data_row.zig");
 const Allocator = std.mem.Allocator;
 const StringHashMap = std.StringHashMap([]const u8);
 const AnyReader = std.io.AnyReader;

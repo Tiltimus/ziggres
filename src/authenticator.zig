@@ -1,11 +1,12 @@
 const std = @import("std");
-const Message = @import("./message.zig");
-const ConnectInfo = @import("./connect_info.zig");
+const Message = @import("message.zig");
+const ConnectInfo = @import("connect_info.zig");
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const AnyReader = std.io.AnyReader;
 const AnyWriter = std.io.AnyWriter;
 const SASLInitialResponse = Message.SASLInitialResponse;
+const expect = std.testing.expect;
 
 state: State,
 connect_info: ConnectInfo,
@@ -186,4 +187,8 @@ pub fn transition(
             }
         },
     }
+}
+
+test "simple test" {
+    try expect(1 == 1);
 }

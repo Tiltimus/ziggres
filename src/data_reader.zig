@@ -1,6 +1,6 @@
 const std = @import("std");
-const Message = @import("./message.zig");
-const DataRow = @import("./data_row.zig");
+const Message = @import("message.zig");
+const DataRow = @import("data_row.zig");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const AnyReader = std.io.AnyReader;
 

@@ -1,5 +1,5 @@
 const std = @import("std");
-const Message = @import("./message.zig");
+const Message = @import("message.zig");
 const Types = @import("types.zig");
 const Allocator = std.mem.Allocator;
 const AnyReader = std.io.AnyReader;

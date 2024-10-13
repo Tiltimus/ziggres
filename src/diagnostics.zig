@@ -1,5 +1,5 @@
 const std = @import("std");
-const Datetime = @import("../datetime.zig");
+const Datetime = @import("datetime.zig");
 const AnyWriter = std.io.AnyWriter;
 
 const Diagnostics = @This();
