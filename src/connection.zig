@@ -8,6 +8,7 @@ const DataReader = @import("data_reader.zig");
 const Listener = @import("listener.zig");
 const Types = @import("types.zig");
 const Datetime = @import("datetime.zig");
+const EventEmitter = @import("event_emitter.zig").EventEmitter;
 const Network = std.net;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -26,13 +27,13 @@ stream: Network.Stream,
 connect_info: ConnectInfo,
 
 fn stream_read(context: *const anyopaque, buffer: []u8) anyerror!usize {
-    const ptr: *const Network.Stream = @alignCast(@ptrCast(context));
-    return Network.Stream.read(ptr.*, buffer);
+    const connection: *const Connection = @ptrCast(@alignCast(context));
+    return try connection.stream.read(buffer);
 }
 
 fn stream_write(context: *const anyopaque, bytes: []const u8) anyerror!usize {
-    const ptr: *const Network.Stream = @alignCast(@ptrCast(context));
-    return Network.Stream.write(ptr.*, bytes);
+    const connection: *const Connection = @ptrCast(@alignCast(context));
+    return connection.stream.write(bytes);
 }
 
 pub fn connect(allocator: Allocator, connect_info: ConnectInfo) !Connection {
@@ -109,11 +110,12 @@ pub fn prepare(self: *Connection, statement: []const u8, parameters: anytype) !*
                 else => @compileError("Expected tuple argument, found" ++ @typeName(parameters)),
             }
 
+            const event_emitter = EventEmitter(DataReader.Event).init(self, &send_data_reader_event);
+
             const query_state = Query{
                 .arena_allocator = &self.arena_allocator,
                 .state = .parse,
-                .context = @ptrCast(self),
-                .send_event = &send_data_reader_event,
+                .emitter = event_emitter,
             };
 
             self.state = .{ .querying = query_state };
@@ -162,11 +164,12 @@ pub fn prepare(self: *Connection, statement: []const u8, parameters: anytype) !*
 pub fn query(self: *Connection, statement: []const u8) !*DataReader {
     switch (self.state) {
         .ready => {
+            const event_emitter = EventEmitter(DataReader.Event).init(self, &send_data_reader_event);
+
             const query_state = Query{
                 .allocator = self.allocator,
                 .state = .{ .query = statement },
-                .context = @ptrCast(self),
-                .send_event = &send_data_reader_event,
+                .emitter = event_emitter,
             };
 
             self.state = .{ .querying = query_state };
@@ -217,15 +220,13 @@ pub fn listen(self: *Connection, statement: []const u8, func: *const fn (event: 
 
             try data_reader.drain();
 
-            const reader = AnyReader{
-                .context = @ptrCast(&self.stream),
-                .readFn = &stream_read,
-            };
+            const reader = self.any_reader();
+
+            const event_emitter = EventEmitter(Listener.Event).init(self, &send_listening_event);
 
             const listener = Listener{
-                .context = @ptrCast(self),
                 .reader = reader,
-                .send_event = &send_listening_event,
+                .emitter = event_emitter,
                 .state = .{ .listening = undefined },
             };
 
@@ -242,11 +243,22 @@ pub fn listen(self: *Connection, statement: []const u8, func: *const fn (event: 
     }
 }
 
-fn transition(self: *Connection, event: Event) !void {
-    const reader = AnyReader{
-        .context = @ptrCast(&self.stream),
+pub fn any_reader(self: *const Connection) AnyReader {
+    return AnyReader{
+        .context = @ptrCast(self),
         .readFn = &stream_read,
     };
+}
+
+pub fn any_writer(self: *const Connection) AnyReader {
+    return AnyWriter{
+        .context = @ptrCast(self),
+        .writeFn = &stream_write,
+    };
+}
+
+fn transition(self: *Connection, event: Event) !void {
+    const reader = self.any_reader();
 
     const writer = AnyWriter{
         .context = @ptrCast(&self.stream),

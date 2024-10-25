@@ -2,6 +2,7 @@ const std = @import("std");
 const Connection = @import("connection.zig");
 const ConnectInfo = @import("connect_info.zig");
 const Message = @import("message.zig");
+const EventEmitter = @import("event_emitter.zig").EventEmitter;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const AnyReader = std.io.AnyReader;
@@ -9,11 +10,8 @@ const AnyReader = std.io.AnyReader;
 const Listener = @This();
 
 reader: AnyReader,
-context: *anyopaque,
-send_event: SendEvent,
+emitter: EventEmitter(Event),
 state: State = .{ .idle = undefined },
-
-pub const SendEvent = *const fn (context: *anyopaque, event: Event) anyerror!void;
 
 pub const State = union(enum) {
     idle: void,
@@ -61,7 +59,7 @@ pub fn transition(self: *Listener, event: Event) !void {
 
 pub fn on_message(self: *Listener, allocator: Allocator, func: *const fn (event: Message.NotificationResponse) anyerror!void) !void {
     while (self.state == .listening) {
-        try self.send_event(self.context, .{
+        try self.emitter.emit(.{
             .listen = Listen{
                 .allocator = allocator,
                 .func = func,

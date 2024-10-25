@@ -1,7 +1,7 @@
 {
     "name": "Zig + Kcov Dev Container",
-    "dockerFile": "../Dockerfile",
-    "context": "..",
+    "dockerComposeFile": ["../docker-compose.yml"],
+    "service": "app",
     "customizations": {
         "vscode": {
             "settings": {
@@ -12,11 +12,17 @@
             "extensions": ["ziglang.vscode-zig", "ritwickdey.LiveServer"]
         }
     },
-    "postCreateCommand": "zig version && kcov --version",
     "remoteUser": "root",
-    "mounts": [
-      "source=${localWorkspaceFolder},target=/workspace,type=bind"
-    ],
-    "workspaceFolder": "/workspace"
+    "workspaceFolder": "/workspace",
+    "portsAttributes": {
+        "3000": {
+          "label": "App Port",
+          "onAutoForward": "notify"
+        },
+        "5432": {
+          "label": "PostgreSQL Database",
+          "onAutoForward": "notify"
+        }
+      }
   }
   

@@ -1,6 +1,7 @@
 const std = @import("std");
 const Message = @import("message.zig");
 const DataRow = @import("data_row.zig");
+const EventEmitter = @import("event_emitter.zig").EventEmitter;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const AnyReader = std.io.AnyReader;
 
@@ -9,8 +10,7 @@ const DataReader = @This();
 arena_allocator: *ArenaAllocator,
 reader: AnyReader,
 state: State,
-context: *anyopaque,
-send_event: *const fn (context: *anyopaque, event: Event) anyerror!void,
+emitter: EventEmitter(Event),
 
 pub const State = union(enum) {
     start: void,
@@ -45,7 +45,7 @@ pub fn next(self: *const DataReader) !?*const DataRow {
         else => {},
     }
 
-    try self.send_event(self.context, .{ .next = undefined });
+    try self.emitter.emit(.{ .next = undefined });
 
     switch (self.state) {
         .data_row => |*data_row| return data_row,
@@ -144,7 +144,7 @@ pub fn transition(self: *DataReader, event: Event) !void {
 fn send_data_row_event(ptr: *anyopaque, event: DataRow.Event) anyerror!void {
     var data_reader: *DataReader = @alignCast(@ptrCast(ptr));
 
-    try data_reader.send_event(data_reader.context, .{ .data_row = event });
+    try data_reader.emitter.emit(.{ .data_row = event });
 }
 
 pub fn jsonStringify(self: DataReader, writer: anytype) !void {

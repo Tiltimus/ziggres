@@ -521,7 +521,7 @@ pub fn read(reader: AnyReader, arena_allocator: *ArenaAllocator) !Message {
                 };
             }
 
-            const buffer = try allocator.alloc(u8, @intCast(message_len - 2));
+            const buffer = try allocator.alloc(u8, @intCast(message_len - 4));
 
             _ = try reader.read(buffer);
 
@@ -1712,7 +1712,7 @@ pub fn write(message: Message, writer: AnyWriter) !void {
             }
         },
         .parameter_status => |parameter_status| {
-            const payload_len = 4 + parameter_status.key.len + parameter_status.value.len;
+            const payload_len = 6 + parameter_status.key.len + parameter_status.value.len;
 
             try writer.writeByte('S');
             try writer.writeInt(i32, @intCast(payload_len), .big);

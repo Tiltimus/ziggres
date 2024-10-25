@@ -1,14 +1,14 @@
 const std = @import("std");
 const Message = @import("message.zig");
 const DataReader = @import("data_reader.zig");
+const EventEmitter = @import("event_emitter.zig").EventEmitter;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const AnyReader = std.io.AnyReader;
 const AnyWriter = std.io.AnyWriter;
 
 arena_allocator: *ArenaAllocator,
 state: State,
-context: *anyopaque,
-send_event: *const fn (context: *anyopaque, event: DataReader.Event) anyerror!void,
+emitter: EventEmitter(DataReader.Event),
 
 const Query = @This();
 
@@ -213,8 +213,7 @@ pub fn transition(
                                 .arena_allocator = self.arena_allocator,
                                 .reader = reader,
                                 .state = .{ .end = command_complete },
-                                .context = self.context,
-                                .send_event = self.send_event,
+                                .emitter = self.emitter,
                             };
 
                             self.state = .{ .data_reader = data_reader };
@@ -234,8 +233,7 @@ pub fn transition(
                 .arena_allocator = self.arena_allocator,
                 .reader = reader,
                 .state = .{ .start = undefined },
-                .context = self.context,
-                .send_event = self.send_event,
+                .emitter = self.emitter,
             };
 
             self.state = .{ .data_reader = data_reader };

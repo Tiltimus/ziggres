@@ -169,11 +169,7 @@ pub fn transition(
 
                     switch (message) {
                         .authentication_ok => |_| {
-
-                            // TODO: After the auth ok a bunch of meta data gets sent atm I don't care about it but needs to be added in ?
-                            var buffer: [1024]u8 = undefined;
-
-                            _ = try reader.readAtLeast(&buffer, 1);
+                            while (try Message.read(reader, arena_allocator) != .ready_for_query) {}
 
                             self.state = .{ .authenticated = undefined };
                         },
