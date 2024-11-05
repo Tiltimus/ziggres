@@ -318,6 +318,7 @@ pub const CommandType = enum {
     fetch,
     copy,
     listen,
+    create_table,
 };
 
 pub const AuthenticationType = enum(i32) {
@@ -715,6 +716,16 @@ pub fn read(reader: AnyReader, arena_allocator: *ArenaAllocator) !Message {
                         .command = .delete,
                         .oid = 0,
                         .rows = rows,
+                    },
+                };
+            }
+
+            if (startsWith(u8, &buffer, "CREATE TABLE")) {
+                return Message{
+                    .command_complete = CommandComplete{
+                        .command = .create_table,
+                        .oid = 0,
+                        .rows = 0,
                     },
                 };
             }

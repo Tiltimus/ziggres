@@ -1,5 +1,5 @@
 services:
-  app:
+  ziggres:
     tty: true
     build:
       context: .

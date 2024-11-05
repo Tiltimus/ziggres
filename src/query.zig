@@ -26,7 +26,6 @@ pub const Event = union(enum) {
     read_parameter_description: void,
     read_ready_for_query: void,
     read_data_reader: void,
-    data_reading: DataReader.Event,
 };
 
 pub const State = union(enum) {
@@ -212,7 +211,7 @@ pub fn transition(
                             const data_reader = DataReader{
                                 .arena_allocator = self.arena_allocator,
                                 .reader = reader,
-                                .state = .{ .end = command_complete },
+                                .state = .{ .command_complete = command_complete },
                                 .emitter = self.emitter,
                             };
 
@@ -237,14 +236,6 @@ pub fn transition(
             };
 
             self.state = .{ .data_reader = data_reader };
-        },
-        .data_reading => |data_reading_event| {
-            switch (self.state) {
-                .data_reader => |*data_reader| {
-                    try data_reader.transition(data_reading_event);
-                },
-                else => unreachable,
-            }
         },
     }
 }

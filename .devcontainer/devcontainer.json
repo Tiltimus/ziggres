@@ -1,28 +1,33 @@
 {
-    "name": "Zig + Kcov Dev Container",
-    "dockerComposeFile": ["../docker-compose.yml"],
-    "service": "app",
-    "customizations": {
-        "vscode": {
-            "settings": {
-                "terminal.integrated.shell.linux": "/bin/bash",
-                "zig.path": "/usr/local/bin/zig",
-                "zig.zls.path": "/usr/local/bin/zls"
-            },
-            "extensions": ["ziglang.vscode-zig", "ritwickdey.LiveServer"]
-        }
+  "name": "Zig + Kcov Dev Container",
+  "dockerComposeFile": [
+    "../docker-compose.yml"
+  ],
+  "service": "ziggres",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.shell.linux": "/bin/bash",
+        "zig.path": "/usr/local/bin/zig",
+        "zig.zls.path": "/usr/local/bin/zls"
+      },
+      "extensions": [
+        "ziglang.vscode-zig",
+        "ritwickdey.LiveServer",
+        "ms-azuretools.vscode-docker"
+      ]
+    }
+  },
+  "remoteUser": "root",
+  "workspaceFolder": "/workspace",
+  "portsAttributes": {
+    "3000": {
+      "label": "App Port",
+      "onAutoForward": "notify"
     },
-    "remoteUser": "root",
-    "workspaceFolder": "/workspace",
-    "portsAttributes": {
-        "3000": {
-          "label": "App Port",
-          "onAutoForward": "notify"
-        },
-        "5432": {
-          "label": "PostgreSQL Database",
-          "onAutoForward": "notify"
-        }
-      }
+    "5432": {
+      "label": "PostgreSQL Database",
+      "onAutoForward": "notify"
+    }
   }
-  
+}

@@ -7,6 +7,11 @@ const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const AnyReader = std.io.AnyReader;
 
+// This needs to be rewritten its poo
+// Should have a table of subscribed channels
+// and look again into multiplexing the stream
+// probs need a mutex on the reader maybe make my own reader
+// writer that locks on read / write ? unsure
 const Listener = @This();
 
 reader: AnyReader,

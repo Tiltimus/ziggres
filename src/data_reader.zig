@@ -15,7 +15,8 @@ emitter: EventEmitter(Event),
 pub const State = union(enum) {
     start: void,
     data_row: DataRow,
-    end: Message.CommandComplete,
+    command_complete: Message.CommandComplete,
+    error_response: Message.ErrorResponse,
 };
 
 pub const Error = error{
@@ -39,12 +40,7 @@ pub fn init(
     };
 }
 
-pub fn next(self: *const DataReader) !?*const DataRow {
-    switch (self.state) {
-        .end => return null, // If we are done don't send the event and bail
-        else => {},
-    }
-
+pub fn next(self: *DataReader) !?*DataRow {
     try self.emitter.emit(.{ .next = undefined });
 
     switch (self.state) {
@@ -53,17 +49,9 @@ pub fn next(self: *const DataReader) !?*const DataRow {
     }
 }
 
-pub fn drain(self: *const DataReader) !void {
-    switch (self.state) {
-        .data_row => |_| {
-            _ = try self.next();
-            try self.drain();
-        },
-        .start => {
-            _ = try self.next();
-            try self.drain();
-        },
-        .end => {},
+pub fn drain(self: *DataReader) !void {
+    while (try self.next()) |data_row| {
+        try data_row.drain();
     }
 }
 
@@ -76,10 +64,11 @@ pub fn transition(self: *DataReader, event: Event) !void {
 
                     switch (message) {
                         .data_row => |no_context_data_row| {
+                            const emitter = EventEmitter(DataRow.Event).init(self, &send_data_row_event);
+
                             const data_row = DataRow.init(
                                 no_context_data_row,
-                                self,
-                                &send_data_row_event,
+                                emitter,
                             );
 
                             self.state = .{ .data_row = data_row };
@@ -92,9 +81,15 @@ pub fn transition(self: *DataReader, event: Event) !void {
                                 else => unreachable,
                             }
 
-                            self.state = .{ .end = command_complete };
+                            self.state = .{ .command_complete = command_complete };
                         },
-
+                        .error_response => |error_response| {
+                            self.state = .{ .error_response = error_response };
+                        },
+                        // TODO: Decide how to handle notice_responses
+                        .notice_response => |_| {
+                            try self.transition(event);
+                        },
                         else => unreachable,
                     }
                 },
@@ -105,10 +100,11 @@ pub fn transition(self: *DataReader, event: Event) !void {
 
                     switch (message) {
                         .data_row => |no_context_data_row| {
+                            const emitter = EventEmitter(DataRow.Event).init(self, &send_data_row_event);
+
                             const data_row = DataRow.init(
                                 no_context_data_row,
-                                self,
-                                &send_data_row_event,
+                                emitter,
                             );
 
                             self.state = .{ .data_row = data_row };
@@ -121,13 +117,14 @@ pub fn transition(self: *DataReader, event: Event) !void {
                                 else => unreachable,
                             }
 
-                            self.state = .{ .end = command_complete };
+                            self.state = .{ .command_complete = command_complete };
                         },
 
                         else => unreachable,
                     }
                 },
-                .end => {},
+                .command_complete => {},
+                .error_response => {},
             }
         },
         .data_row => |data_row_event| {

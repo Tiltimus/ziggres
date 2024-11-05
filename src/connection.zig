@@ -80,8 +80,11 @@ fn authenticate(self: *Connection) !void {
 }
 
 pub fn close(self: *Connection) void {
+    // No idea if this is good but I wanted the defer close :(
     self.transition(.{ .close = undefined }) catch
         @panic("Failed to close connection");
+
+    self.* = undefined;
 }
 
 // TODO: Maybe rename to extended query i dunno
@@ -133,25 +136,8 @@ pub fn prepare(self: *Connection, statement: []const u8, parameters: anytype) !*
             try self.transition(.{ .querying = .read_bind_complete });
             try self.transition(.{ .querying = .read_data_reader });
 
-            switch (self.state.querying.state) {
+            switch (self.state) {
                 .data_reader => |*data_reader| return data_reader,
-                else => unreachable,
-            }
-        },
-        .querying => |*current_query| {
-            switch (current_query.state) {
-                .data_reader => |*data_reader| {
-
-                    // Drain current data_reader and ensure stream has been cleared
-                    try data_reader.drain();
-
-                    // Set state ready
-                    self.state = .{ .ready = undefined };
-
-                    // Recursive call probably better way to write it but too much haskell brain
-                    return self.prepare(statement, parameters);
-                },
-                // .error_response => |error_response| self.state = (.{ .error_response = error_response }),
                 else => unreachable,
             }
         },
@@ -210,9 +196,11 @@ pub fn query(self: *Connection, statement: []const u8) !*DataReader {
         else => unreachable,
     }
 
+    // For some reason the complier doesn't catch the ureachable in the switch
     unreachable;
 }
 
+// TODO: Rewrite listen
 pub fn listen(self: *Connection, statement: []const u8, func: *const fn (event: Message.NotificationResponse) anyerror!void) !void {
     switch (self.state) {
         .ready => {
@@ -243,14 +231,14 @@ pub fn listen(self: *Connection, statement: []const u8, func: *const fn (event: 
     }
 }
 
-pub fn any_reader(self: *const Connection) AnyReader {
+pub fn any_reader(self: *Connection) AnyReader {
     return AnyReader{
         .context = @ptrCast(self),
         .readFn = &stream_read,
     };
 }
 
-pub fn any_writer(self: *const Connection) AnyReader {
+pub fn any_writer(self: *Connection) AnyWriter {
     return AnyWriter{
         .context = @ptrCast(self),
         .writeFn = &stream_write,
@@ -260,10 +248,7 @@ pub fn any_writer(self: *const Connection) AnyReader {
 fn transition(self: *Connection, event: Event) !void {
     const reader = self.any_reader();
 
-    const writer = AnyWriter{
-        .context = @ptrCast(&self.stream),
-        .writeFn = &stream_write,
-    };
+    const writer = self.any_writer();
 
     switch (event) {
         .authenticator => |auth_event| {
@@ -303,30 +288,25 @@ fn transition(self: *Connection, event: Event) !void {
                             self.state = (.{ .ready = undefined });
                             _ = self.arena_allocator.reset(.free_all);
                         },
+                        .data_reader => |data_reader| {
+                            self.state = .{ .data_reader = data_reader };
+                        },
                         .error_response => |error_response| self.state = (.{ .error_response = error_response }),
                         else => {},
                     }
                 },
-                else => {
-                    const allocator = self.arena_allocator.allocator();
-
-                    @panic(try std.fmt.allocPrint(allocator, "Unexpected state: {s}", .{self.state}));
-                },
+                else => unreachable,
             }
         },
         .data_reading => |data_reading_event| {
             switch (self.state) {
-                .querying => |*current_query| {
-                    try current_query.transition(
-                        &self.arena_allocator,
-                        .{ .data_reading = data_reading_event },
-                        reader,
-                        writer,
-                    );
+                .data_reader => |*data_reader| {
+                    try data_reader.transition(data_reading_event);
 
-                    switch (current_query.state) {
+                    switch (data_reader.state) {
                         .command_complete => {
                             self.state = (.{ .ready = undefined });
+                            data_reader.* = undefined;
                             _ = self.arena_allocator.reset(.free_all);
                         },
                         .error_response => |error_response| self.state = (.{ .error_response = error_response }),
@@ -385,6 +365,7 @@ pub const Event = union(enum) {
 pub const State = union(enum) {
     authenticating: Authenticator,
     querying: Query,
+    data_reader: DataReader,
     ready: void,
     closed: void,
     listening: Listener,
@@ -397,13 +378,14 @@ pub const State = union(enum) {
             .error_response => |error_response| {
                 try Json.stringify(error_response, .{}, writer);
             },
-
             .authenticating => |authenticator| {
                 try Json.stringify(authenticator.state, .{}, writer);
             },
-
             .querying => |current_query| {
                 try Json.stringify(current_query.state, .{}, writer);
+            },
+            .data_reader => |data_reader| {
+                try Json.stringify(data_reader.state, .{}, writer);
             },
             .ready => {
                 try Json.stringify(@tagName(self), .{}, writer);

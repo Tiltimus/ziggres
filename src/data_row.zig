@@ -1,6 +1,7 @@
 const std = @import("std");
 const Message = @import("message.zig");
 const Types = @import("types.zig");
+const EventEmitter = @import("event_emitter.zig").EventEmitter;
 const Allocator = std.mem.Allocator;
 const AnyReader = std.io.AnyReader;
 const startsWith = std.mem.startsWith;
@@ -13,11 +14,8 @@ length: i32,
 columns: i16,
 current_column: u8 = 0,
 reader: AnyReader,
-context: *anyopaque,
-send_event: SendEvent,
+emitter: EventEmitter(Event),
 state: State = .{ .idle = undefined },
-
-pub const SendEvent = *const fn (context: *anyopaque, event: Event) anyerror!void;
 
 pub const NoContextDataRow = struct {
     length: i32,
@@ -34,6 +32,7 @@ pub const Error = error{
 
 pub const State = union(enum) {
     idle: void,
+    drained: void,
     read_message_length: i32,
     read_reminder_alloc: []u8,
     read_alloc: []u8,
@@ -60,17 +59,12 @@ pub const Event = union(enum) {
     }
 };
 
-pub fn init(
-    no_context_data_row: NoContextDataRow,
-    context: *anyopaque,
-    send_event: SendEvent,
-) DataRow {
+pub fn init(no_context_data_row: NoContextDataRow, emitter: EventEmitter(Event)) DataRow {
     return DataRow{
         .length = no_context_data_row.length,
         .reader = no_context_data_row.reader,
         .columns = no_context_data_row.columns,
-        .context = context,
-        .send_event = send_event,
+        .emitter = emitter,
     };
 }
 
@@ -136,6 +130,8 @@ pub fn transition(self: *DataRow, event: Event) !void {
                 _ = try self.reader.skipBytes(@intCast(length), .{});
                 self.current_column += 1;
             }
+
+            self.state = .{ .drained = undefined };
         },
         .read_alloc_optional => |allocator| {
             if (self.columns == self.current_column) return Error.OutOfBounds;
@@ -158,14 +154,14 @@ pub fn transition(self: *DataRow, event: Event) !void {
     }
 }
 
-pub fn drain(self: *const DataRow) !void {
+pub fn drain(self: DataRow) !void {
     if (self.columns == self.current_column) return;
 
-    try self.send_event(self.context, .{ .drain = undefined });
+    try self.emitter.emit(.{ .drain = undefined });
 }
 
-pub fn read_alloc(self: *const DataRow, allocator: Allocator) ![]u8 {
-    try self.send_event(self.context, .{ .read_alloc = allocator });
+pub fn read_alloc(self: *DataRow, allocator: Allocator) ![]u8 {
+    try self.emitter.emit(.{ .read_alloc = allocator });
 
     switch (self.state) {
         .read_alloc => |buff| return buff,
@@ -173,8 +169,8 @@ pub fn read_alloc(self: *const DataRow, allocator: Allocator) ![]u8 {
     }
 }
 
-pub fn read_buff(self: *const DataRow, buff: []u8) !usize {
-    try self.send_event(self.context, .{ .read_buff = buff });
+pub fn read_buff(self: *DataRow, buff: []u8) !usize {
+    try self.emitter.emit(.{ .read_buff = buff });
 
     switch (self.state) {
         .read_buff => |bytes_read| return bytes_read,
@@ -182,8 +178,8 @@ pub fn read_buff(self: *const DataRow, buff: []u8) !usize {
     }
 }
 
-pub fn read_alloc_optional(self: *const DataRow, allocator: Allocator) !?[]u8 {
-    try self.send_event(self.context, .{ .read_alloc_optional = allocator });
+pub fn read_alloc_optional(self: *DataRow, allocator: Allocator) !?[]u8 {
+    try self.emitter.emit(.{ .read_alloc_optional = allocator });
 
     switch (self.state) {
         .read_alloc_optional => |buff| return buff,
@@ -191,7 +187,7 @@ pub fn read_alloc_optional(self: *const DataRow, allocator: Allocator) !?[]u8 {
     }
 }
 
-pub fn from_field(self: *const DataRow, T: type, allocator: Allocator) !T {
+pub fn from_field(self: *DataRow, T: type, allocator: Allocator) !T {
     const message_length = try self.read_message_length();
 
     // Check for null
@@ -253,7 +249,7 @@ pub fn jsonStringify(self: DataRow, writer: anytype) !void {
 }
 
 fn read_message_length(self: *const DataRow) !i32 {
-    try self.send_event(self.context, .{ .read_message_length = undefined });
+    try self.emitter.emit(.{ .read_message_length = undefined });
 
     switch (self.state) {
         .read_message_length => |length| return length,
@@ -262,7 +258,7 @@ fn read_message_length(self: *const DataRow) !i32 {
 }
 
 fn read_reminder_alloc(self: *const DataRow, allocator: Allocator) ![]u8 {
-    try self.send_event(self.context, .{ .read_reminder_alloc = allocator });
+    try self.emitter.emit(.{ .read_reminder_alloc = allocator });
 
     switch (self.state) {
         .read_reminder_alloc => |buff| return buff,

@@ -3,15 +3,14 @@ const Connection = @import("connection.zig");
 const Diagnostics = @import("diagnostics.zig");
 const Listener = @import("listener.zig");
 const Message = @import("message.zig");
+const Protocol = @import("protocol.zig");
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const ConnectInfo = Connection.ConnectInfo;
 
 pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-
-    const allocator = arena.allocator();
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    const allocator = gpa.allocator();
 
     const connect_info = .{
         .host = "db",
@@ -25,32 +24,25 @@ pub fn main() !void {
     var connection = try Connection.connect(allocator, connect_info);
     defer connection.close();
 
-    // var data_reader = try connection.prepare("SELECT * FROM test_table", .{});
+    const sql =
+        \\CREATE TABLE IF NOT EXISTS public.test_table
+        \\(
+        \\ id serial NOT NULL,
+        \\ firstname character varying NOT NULL,
+        \\ lastname character varying NOT NULL,
+        \\ CONSTRAINT test_table_pkey PRIMARY KEY (id)
+        \\)
+    ;
 
-    // while (try data_reader.next()) |data_row| {
-    //     try data_row.drain();
-    // }
+    var data_reader = try connection.prepare(sql, .{});
 
-    _ = try connection.listen("LISTEN table_change", &table_change);
-}
+    try data_reader.drain();
 
-fn stream_read_listen(connection: *Connection) !void {
-    var cond = std.Thread.Condition{};
+    var data_reader_2 = try connection.prepare("INSERT INTO test_table VALUES (DEFAULT, $1, $2)", .{ "hello", "world" });
 
-    while (connection.state == .ready) {
-        connection.stream_mutex.lock();
-        defer connection.stream_mutex.unlock();
+    try data_reader_2.drain();
 
-        var buffer: [128]u8 = undefined;
+    const protocol = Protocol.net_stream();
 
-        std.log.debug("READ THREAD BEFORE", .{});
-        _ = try connection.stream.readAll(&buffer);
-        std.log.debug("READ THREAD AFTER", .{});
-
-        cond.wait(&connection.stream_mutex);
-    }
-}
-
-fn table_change(_: Message.NotificationResponse) !void {
-    std.log.debug("MESSAGE", .{});
+    _ = try protocol.connect(std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 3000));
 }
