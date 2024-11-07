@@ -8,6 +8,7 @@ const AnyReader = std.io.AnyReader;
 const DataReader = @This();
 
 arena_allocator: *ArenaAllocator,
+row_description: ?Message.RowDescription = null,
 reader: AnyReader,
 state: State,
 emitter: EventEmitter(Event),
@@ -68,6 +69,7 @@ pub fn transition(self: *DataReader, event: Event) !void {
 
                             const data_row = DataRow.init(
                                 no_context_data_row,
+                                self.row_description.?,
                                 emitter,
                             );
 
@@ -104,6 +106,7 @@ pub fn transition(self: *DataReader, event: Event) !void {
 
                             const data_row = DataRow.init(
                                 no_context_data_row,
+                                self.row_description.?,
                                 emitter,
                             );
 

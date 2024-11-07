@@ -7,6 +7,7 @@ const AnyReader = std.io.AnyReader;
 const startsWith = std.mem.startsWith;
 const endsWith = std.mem.endsWith;
 const from_bytes = Types.from_bytes;
+const eql = std.mem.eql;
 
 const DataRow = @This();
 
@@ -15,6 +16,7 @@ columns: i16,
 current_column: u8 = 0,
 reader: AnyReader,
 emitter: EventEmitter(Event),
+row_description: Message.RowDescription,
 state: State = .{ .idle = undefined },
 
 pub const NoContextDataRow = struct {
@@ -28,6 +30,7 @@ pub const Error = error{
     UnexpectedNull,
     UnexpectedValue,
     OutOfBounds,
+    MissingColumn,
 };
 
 pub const State = union(enum) {
@@ -59,12 +62,17 @@ pub const Event = union(enum) {
     }
 };
 
-pub fn init(no_context_data_row: NoContextDataRow, emitter: EventEmitter(Event)) DataRow {
+pub fn init(
+    no_context_data_row: NoContextDataRow,
+    row_description: Message.RowDescription,
+    emitter: EventEmitter(Event),
+) DataRow {
     return DataRow{
         .length = no_context_data_row.length,
         .reader = no_context_data_row.reader,
         .columns = no_context_data_row.columns,
         .emitter = emitter,
+        .row_description = row_description,
     };
 }
 
@@ -152,6 +160,22 @@ pub fn transition(self: *DataRow, event: Event) !void {
             self.current_column += 1;
         },
     }
+}
+
+// TODO: Better error handling when it either is missing a column or has one too many
+pub fn map(self: *DataRow, T: type, allocator: Allocator) !T {
+    var value: T = undefined;
+
+    for (self.row_description.columns) |col| {
+        inline for (std.meta.fields(T)) |field| {
+            if (eql(u8, field.name, col.field_name)) {
+                @field(value, field.name) = try self.from_field(field.type, allocator);
+                break;
+            }
+        }
+    }
+
+    return value;
 }
 
 pub fn drain(self: DataRow) !void {

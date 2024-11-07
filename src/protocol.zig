@@ -5,23 +5,24 @@ const AnyReader = std.io.AnyReader;
 const AnyWriter = std.io.AnyWriter;
 const Address = std.net.Address;
 const Stream = std.net.Stream;
+const Allocator = std.mem.Allocator;
 
-context: *const anyopaque,
-read_fn: *const fn (context: *const anyopaque, buffer: []u8) anyerror!usize,
-write_fn: *const fn (context: *const anyopaque, bytes: []const u8) anyerror!usize,
-connect_fn: *const fn (address: Address) anyerror!Protocol,
-close_fn: *const fn (context: *const anyopaque) anyerror!void,
+context: *anyopaque,
+read_fn: *const fn (context: *anyopaque, buffer: []u8) anyerror!usize,
+write_fn: *const fn (context: *anyopaque, bytes: []const u8) anyerror!usize,
+connect_fn: *const fn (allocator: Allocator, name: []const u8, port: u16) anyerror!Protocol,
+close_fn: *const fn (context: *anyopaque) void,
 
 const Protocol = @This();
 
-pub fn connect(self: Protocol, address: Address) !Protocol {
-    const protocol = try self.connect_fn(address);
+pub fn connect(self: Protocol, allocator: Allocator, name: []const u8, port: u16) !Protocol {
+    const protocol = try self.connect_fn(allocator, name, port);
 
     return protocol;
 }
 
-pub fn close(self: Protocol) !void {
-    try self.close_fn(self.context);
+pub fn close(self: Protocol) void {
+    self.close_fn(self.context);
 }
 
 pub fn read_message(self: Protocol, arena_allocator: *ArenaAllocator) !Message {
@@ -36,18 +37,29 @@ pub fn write_message(self: Protocol, message: Message) !void {
     return try Message.write(message, writer);
 }
 
-pub fn any_reader(self: Protocol) AnyReader {
+pub fn any_reader(self: *Protocol) AnyReader {
     return AnyReader{
-        .context = @alignCast(@ptrCast(self)),
-        .readFn = &read,
+        .context = @ptrCast(self),
+        .readFn = &protocol_read,
     };
 }
 
-pub fn any_writer(self: Protocol) AnyWriter {
+pub fn any_writer(self: *Protocol) AnyWriter {
     return AnyWriter{
-        .context = @alignCast(@ptrCast(self)),
-        .writeFn = &write,
+        .context = @ptrCast(self),
+        .writeFn = &protocol_write,
     };
+}
+
+fn protocol_read(context: *anyopaque, buffer: []u8) !usize {
+    const protocol: *Protocol = @ptrCast(@alignCast(context));
+    return try protocol.read_fn(protocol.context, buffer);
+}
+
+fn protocol_write(context: *anyopaque, bytes: []const u8) !usize {
+    const protocol: *Protocol = @ptrCast(@alignCast(context));
+
+    return try protocol.write_fn(protocol.context, bytes);
 }
 
 pub fn read(self: Protocol, buffer: []u8) !usize {
@@ -62,18 +74,19 @@ pub fn net_stream() Protocol {
     return Protocol{
         .context = undefined,
         .connect_fn = &connect_net_stream,
-        .read_fn = undefined,
-        .close_fn = undefined,
-        .write_fn = undefined,
+        .read_fn = &read_net_stream,
+        .close_fn = &close_net_stream,
+        .write_fn = &write_net_stream,
     };
 }
 
-fn connect_net_stream(address: Address) !Protocol {
-    const stream = try std.net.tcpConnectToAddress(address);
+pub fn connect_net_stream(allocator: Allocator, name: []const u8, port: u16) !Protocol {
+    var stream = try std.net.tcpConnectToHost(allocator, name, port);
     errdefer stream.close();
+    std.log.debug("CONNECT: {any}", .{stream});
 
     return Protocol{
-        .context = @alignCast(@ptrCast(&stream)),
+        .context = @ptrCast(&stream),
         .connect_fn = &connect_net_stream,
         .read_fn = &read_net_stream,
         .close_fn = &close_net_stream,
@@ -81,17 +94,18 @@ fn connect_net_stream(address: Address) !Protocol {
     };
 }
 
-fn read_net_stream(context: *const anyopaque, buffer: []u8) anyerror!usize {
-    const stream: *const Stream = @ptrCast(@alignCast(context));
-    return try stream.stream.read(buffer);
+fn read_net_stream(context: *anyopaque, buffer: []u8) anyerror!usize {
+    const stream: *Stream = @ptrCast(@alignCast(context));
+    return try stream.read(buffer);
 }
 
-fn write_net_stream(context: *const anyopaque, bytes: []const u8) anyerror!usize {
-    const stream: *const Stream = @ptrCast(@alignCast(context));
-    return try stream.stream.write(bytes);
+fn write_net_stream(context: *anyopaque, bytes: []const u8) anyerror!usize {
+    const stream: *Stream = @ptrCast(@alignCast(context));
+    std.log.debug("{any}", .{stream});
+    return stream.write(bytes);
 }
 
-fn close_net_stream(context: *const anyopaque) anyerror!void {
-    const stream: *const Stream = @ptrCast(@alignCast(context));
+fn close_net_stream(context: *anyopaque) void {
+    const stream: *Stream = @ptrCast(@alignCast(context));
     stream.close();
 }

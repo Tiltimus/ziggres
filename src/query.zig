@@ -9,6 +9,7 @@ const AnyWriter = std.io.AnyWriter;
 arena_allocator: *ArenaAllocator,
 state: State,
 emitter: EventEmitter(DataReader.Event),
+row_description: ?Message.RowDescription = null,
 
 const Query = @This();
 
@@ -167,6 +168,7 @@ pub fn transition(
 
             switch (message) {
                 .row_description => |row_description| {
+                    self.row_description = row_description;
                     self.state = .{ .received_row_description = row_description };
                 },
                 .no_data => {
@@ -217,7 +219,7 @@ pub fn transition(
 
                             self.state = .{ .data_reader = data_reader };
                         },
-                        else => @panic("Unexpected message"),
+                        else => unreachable,
                     }
                 },
 
@@ -233,6 +235,7 @@ pub fn transition(
                 .reader = reader,
                 .state = .{ .start = undefined },
                 .emitter = self.emitter,
+                .row_description = self.row_description,
             };
 
             self.state = .{ .data_reader = data_reader };
