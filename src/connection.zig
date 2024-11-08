@@ -81,10 +81,98 @@ fn authenticate(self: *Connection) !void {
 
 pub fn close(self: *Connection) void {
     // No idea if this is good but I wanted the defer close :(
-    self.transition(.{ .close = undefined }) catch
-        @panic("Failed to close connection");
-
+    self.transition(.{ .close = undefined }) catch {};
+    _ = self.arena_allocator.reset(.free_all);
     self.* = undefined;
+}
+
+pub fn execute(self: *Connection, statement: []const u8, parameters: anytype) !void {
+    var data_reader = try self.prepare(statement, parameters);
+    try data_reader.drain();
+}
+
+pub fn insert(self: *Connection, statement: []const u8, parameters: anytype) !void {
+    try self.execute(statement, parameters);
+}
+
+pub fn insert_returning(
+    self: *Connection,
+    T: type,
+    allocator: Allocator,
+    statement: []const u8,
+    parameters: anytype,
+) ![]T {
+    return self.query(T, allocator, statement, parameters);
+}
+
+pub fn delete(self: *Connection, statement: []const u8, parameters: anytype) !void {
+    try self.execute(statement, parameters);
+}
+
+pub fn delete_returning(
+    self: *Connection,
+    T: type,
+    allocator: Allocator,
+    statement: []const u8,
+    parameters: anytype,
+) ![]T {
+    return self.query(T, allocator, statement, parameters);
+}
+
+pub fn update(self: *Connection, statement: []const u8, parameters: anytype) !void {
+    try self.execute(statement, parameters);
+}
+
+pub fn update_returning(
+    self: *Connection,
+    T: type,
+    allocator: Allocator,
+    statement: []const u8,
+    parameters: anytype,
+) ![]T {
+    return self.query(T, allocator, statement, parameters);
+}
+
+pub fn select(
+    self: *Connection,
+    T: type,
+    allocator: Allocator,
+    statement: []const u8,
+    parameters: anytype,
+) ![]T {
+    return self.query(T, allocator, statement, parameters);
+}
+
+pub fn select_one(
+    self: *Connection,
+    T: type,
+    allocator: Allocator,
+    statement: []const u8,
+    parameters: anytype,
+) !?T {
+    var data_reader = try self.prepare(statement, parameters);
+    var value: ?T = null;
+    const data_row = try data_reader.next();
+
+    if (data_row) |row| {
+        value = row.map(T, allocator);
+    }
+
+    try data_reader.drain();
+
+    return value;
+}
+
+pub fn query(
+    self: *Connection,
+    T: type,
+    allocator: Allocator,
+    statement: []const u8,
+    parameters: anytype,
+) ![]T {
+    var data_reader = try self.prepare(statement, parameters);
+
+    return data_reader.map(T, allocator);
 }
 
 // TODO: Maybe rename to extended query i dunno
@@ -147,58 +235,58 @@ pub fn prepare(self: *Connection, statement: []const u8, parameters: anytype) !*
 
 // TODO: Rename and sort out to only use simple query
 // Needs to support being able to handle multiple queries and yadyadaaa
-pub fn query(self: *Connection, statement: []const u8) !*DataReader {
-    switch (self.state) {
-        .ready => {
-            const event_emitter = EventEmitter(DataReader.Event).init(self, &send_data_reader_event);
+// pub fn query(self: *Connection, statement: []const u8) !*DataReader {
+//     switch (self.state) {
+//         .ready => {
+//             const event_emitter = EventEmitter(DataReader.Event).init(self, &send_data_reader_event);
 
-            const query_state = Query{
-                .allocator = self.allocator,
-                .state = .{ .query = statement },
-                .emitter = event_emitter,
-            };
+//             const query_state = Query{
+//                 .allocator = self.allocator,
+//                 .state = .{ .query = statement },
+//                 .emitter = event_emitter,
+//             };
 
-            self.state = .{ .querying = query_state };
+//             self.state = .{ .querying = query_state };
 
-            try self.transition(.{ .querying = .send_query });
-            try self.transition(.{ .querying = .read_query_response });
+//             try self.transition(.{ .querying = .send_query });
+//             try self.transition(.{ .querying = .read_query_response });
 
-            switch (self.state.querying.state) {
-                .data_reader => |*data_reader| return data_reader,
-                .received_row_description => {
-                    try self.transition(.{ .querying = .read_data_reader });
+//             switch (self.state.querying.state) {
+//                 .data_reader => |*data_reader| return data_reader,
+//                 .received_row_description => {
+//                     try self.transition(.{ .querying = .read_data_reader });
 
-                    switch (self.state.querying.state) {
-                        .data_reader => |*data_reader| return data_reader,
-                        else => unreachable,
-                    }
-                },
-                else => unreachable,
-            }
-        },
-        .querying => |*current_query| {
-            switch (current_query.state) {
-                .data_reader => |*data_reader| {
+//                     switch (self.state.querying.state) {
+//                         .data_reader => |*data_reader| return data_reader,
+//                         else => unreachable,
+//                     }
+//                 },
+//                 else => unreachable,
+//             }
+//         },
+//         .querying => |*current_query| {
+//             switch (current_query.state) {
+//                 .data_reader => |*data_reader| {
 
-                    // Drain current data_reader and ensure stream has been cleared
-                    try data_reader.drain();
+//                     // Drain current data_reader and ensure stream has been cleared
+//                     try data_reader.drain();
 
-                    // Set state ready
-                    self.state = .{ .ready = undefined };
+//                     // Set state ready
+//                     self.state = .{ .ready = undefined };
 
-                    // Recursive call probably better way to write it but too much haskell brain
-                    return self.query(statement);
-                },
-                .error_response => |error_response| self.state = (.{ .error_response = error_response }),
-                else => unreachable,
-            }
-        },
-        else => unreachable,
-    }
+//                     // Recursive call probably better way to write it but too much haskell brain
+//                     return self.query(statement);
+//                 },
+//                 .error_response => |error_response| self.state = (.{ .error_response = error_response }),
+//                 else => unreachable,
+//             }
+//         },
+//         else => unreachable,
+//     }
 
-    // For some reason the complier doesn't catch the ureachable in the switch
-    unreachable;
-}
+//     // For some reason the complier doesn't catch the ureachable in the switch
+//     unreachable;
+// }
 
 // TODO: Rewrite listen
 pub fn listen(self: *Connection, statement: []const u8, func: *const fn (event: Message.NotificationResponse) anyerror!void) !void {

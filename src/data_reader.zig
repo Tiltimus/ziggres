@@ -4,6 +4,8 @@ const DataRow = @import("data_row.zig");
 const EventEmitter = @import("event_emitter.zig").EventEmitter;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const AnyReader = std.io.AnyReader;
+const Allocator = std.mem.Allocator;
+const List = std.ArrayList;
 
 const DataReader = @This();
 
@@ -54,6 +56,17 @@ pub fn drain(self: *DataReader) !void {
     while (try self.next()) |data_row| {
         try data_row.drain();
     }
+}
+
+pub fn map(self: *DataReader, T: type, allocator: Allocator) ![]T {
+    var list = List(T).init(allocator);
+    defer list.deinit();
+
+    while (try self.next()) |data_row| {
+        try list.append(try data_row.map(T, allocator));
+    }
+
+    return list.toOwnedSlice();
 }
 
 pub fn transition(self: *DataReader, event: Event) !void {

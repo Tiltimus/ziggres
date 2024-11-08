@@ -36,26 +36,23 @@ pub fn main() !void {
         \\)
     ;
 
-    var data_reader = try connection.prepare(sql, .{});
+    try connection.execute(sql, .{});
 
-    try data_reader.drain();
+    try connection.delete("DELETE FROM test_table RETURNING id", .{});
 
-    var data_reader_2 = try connection.prepare("DELETE FROM test_table", .{});
+    try connection.insert("INSERT INTO test_table VALUES (DEFAULT, $1, $2)", .{ "hello", "world" });
 
-    try data_reader_2.drain();
+    const list = try connection.select(
+        TestTableRow,
+        allocator,
+        "SELECT * FROM test_table",
+        .{},
+    );
+    defer allocator.free(list);
 
-    var data_reader_3 = try connection.prepare("INSERT INTO test_table VALUES (DEFAULT, $1, $2)", .{ "hello", "world" });
-
-    try data_reader_3.drain();
-
-    var data_reader_4 = try connection.prepare("SELECT * FROM test_table", .{});
-
-    while (try data_reader_4.next()) |data_row| {
-        const value = try data_row.map(TestTableRow, allocator);
-        std.log.debug("{any}", .{value});
-
-        allocator.free(value.firstname);
-        allocator.free(value.lastname);
+    for (list) |item| {
+        allocator.free(item.firstname);
+        allocator.free(item.lastname);
     }
 }
 
