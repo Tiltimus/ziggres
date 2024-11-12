@@ -8,11 +8,11 @@ const Stream = std.net.Stream;
 const ArenaAllocator = std.heap.ArenaAllocator;
 const LinkedList = std.SinglyLinkedList;
 const ArrayList = std.ArrayList;
-const fixedBuffer = std.io.fixedBufferStream;
 const base_64_decoder = std.base64.standard.Decoder;
 const base_64_encoder = std.base64.standard.Encoder;
-const startsWith = std.mem.startsWith;
 const test_allocator = std.testing.allocator;
+const fixedBuffer = std.io.fixedBufferStream;
+const startsWith = std.mem.startsWith;
 const expect = std.testing.expect;
 const eql = std.mem.eql;
 
@@ -355,6 +355,11 @@ const Mechanism = enum {
             },
         };
     }
+};
+
+pub const Format = enum {
+    binary,
+    text,
 };
 
 pub fn read(reader: AnyReader, arena_allocator: *ArenaAllocator) !Message {
@@ -714,6 +719,32 @@ pub fn read(reader: AnyReader, arena_allocator: *ArenaAllocator) !Message {
                 return Message{
                     .command_complete = CommandComplete{
                         .command = .delete,
+                        .oid = 0,
+                        .rows = rows,
+                    },
+                };
+            }
+
+            if (startsWith(u8, &buffer, "COPY")) {
+                var rows_buffer: [16]u8 = undefined;
+                var end_row_pos: usize = 0;
+
+                _ = try fixed_reader.skipBytes(5, .{});
+                _ = try fixed_reader.read(&rows_buffer);
+
+                for (0..rows_buffer.len - 1) |index| {
+                    if (rows_buffer[index] == 170) break;
+                    if (rows_buffer[index] == 32) break;
+                    if (rows_buffer[index] == 0) break;
+
+                    end_row_pos += 1;
+                }
+
+                const rows = try std.fmt.parseInt(i32, rows_buffer[0..end_row_pos], 10);
+
+                return Message{
+                    .command_complete = CommandComplete{
+                        .command = .copy,
                         .oid = 0,
                         .rows = rows,
                     },
@@ -1534,6 +1565,7 @@ pub fn write(message: Message, writer: AnyWriter) !void {
 
             try writer.writeByte('d');
             try writer.writeInt(i32, @intCast(payload_len), .big);
+
             _ = try writer.write(copy_data.data);
         },
         .copy_done => {

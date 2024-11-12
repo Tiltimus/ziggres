@@ -2,13 +2,16 @@ const std = @import("std");
 const Message = @import("message.zig");
 const DataReader = @import("data_reader.zig");
 const EventEmitter = @import("event_emitter.zig").EventEmitter;
+const CopyIn = @import("copy_in.zig");
 const ArenaAllocator = std.heap.ArenaAllocator;
 const AnyReader = std.io.AnyReader;
 const AnyWriter = std.io.AnyWriter;
+const FixedBufferAllocator = std.heap.FixedBufferAllocator;
 
 arena_allocator: *ArenaAllocator,
 state: State,
-emitter: EventEmitter(DataReader.Event),
+data_reader_emitter: EventEmitter(DataReader.Event),
+copy_in_emitter: EventEmitter(CopyIn.Event),
 row_description: ?Message.RowDescription = null,
 
 const Query = @This();
@@ -27,6 +30,7 @@ pub const Event = union(enum) {
     read_parameter_description: void,
     read_ready_for_query: void,
     read_data_reader: void,
+    read_copy_in_response: []u8,
 };
 
 pub const State = union(enum) {
@@ -48,6 +52,7 @@ pub const State = union(enum) {
     error_response: Message.ErrorResponse,
     command_complete: Message.CommandComplete,
     data_reader: DataReader,
+    copy_in: CopyIn,
 };
 
 pub fn transition(
@@ -214,7 +219,7 @@ pub fn transition(
                                 .arena_allocator = self.arena_allocator,
                                 .reader = reader,
                                 .state = .{ .command_complete = command_complete },
-                                .emitter = self.emitter,
+                                .emitter = self.data_reader_emitter,
                             };
 
                             self.state = .{ .data_reader = data_reader };
@@ -234,11 +239,29 @@ pub fn transition(
                 .arena_allocator = self.arena_allocator,
                 .reader = reader,
                 .state = .{ .start = undefined },
-                .emitter = self.emitter,
+                .emitter = self.data_reader_emitter,
                 .row_description = self.row_description,
             };
 
             self.state = .{ .data_reader = data_reader };
+        },
+        .read_copy_in_response => |buffer| {
+            const message = try Message.read(reader, arena_allocator);
+
+            switch (message) {
+                .copy_in_response => {
+                    self.state = .{
+                        .copy_in = CopyIn.init(
+                            buffer,
+                            writer,
+                            reader,
+                            self.arena_allocator,
+                            self.copy_in_emitter,
+                        ),
+                    };
+                },
+                else => unreachable,
+            }
         },
     }
 }

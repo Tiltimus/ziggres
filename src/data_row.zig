@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
 const AnyReader = std.io.AnyReader;
 const startsWith = std.mem.startsWith;
 const endsWith = std.mem.endsWith;
-const from_bytes = Types.from_bytes;
+const from_text = Types.from_text;
 const eql = std.mem.eql;
 
 const DataRow = @This();
@@ -245,14 +245,14 @@ pub fn from_field(self: *DataRow, T: type, allocator: Allocator) !T {
     }
 
     switch (@typeInfo(T)) {
-        .Bool => return try from_bytes(T, contents),
-        .Float => return try from_bytes(T, contents),
-        .Int => return try from_bytes(T, contents),
-        .Enum => return try from_bytes(T, contents),
-        .Array => return try from_bytes(T, contents),
-        .Vector => return try from_bytes(T, contents),
-        .Pointer => return try from_bytes(T, contents),
-        .Optional => |optional| return try from_bytes(optional.child, contents),
+        .Bool => return try from_text(T, contents),
+        .Float => return try from_text(T, contents),
+        .Int => return try from_text(T, contents),
+        .Enum => return try from_text(T, contents),
+        .Array => return try from_text(T, contents),
+        .Vector => return try from_text(T, contents),
+        .Pointer => return try from_text(T, contents),
+        .Optional => |optional| return try from_text(optional.child, contents),
         else => @compileError("Unsupported type"),
     }
 }

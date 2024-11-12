@@ -9,6 +9,7 @@ const Listener = @import("listener.zig");
 const Types = @import("types.zig");
 const Datetime = @import("datetime.zig");
 const EventEmitter = @import("event_emitter.zig").EventEmitter;
+const CopyIn = @import("copy_in.zig");
 const Network = std.net;
 const Allocator = std.mem.Allocator;
 const ArenaAllocator = std.heap.ArenaAllocator;
@@ -16,6 +17,8 @@ const AnyReader = std.io.AnyReader;
 const AnyWriter = std.io.AnyWriter;
 const Json = std.json;
 const ArrayList = std.ArrayList;
+const FixedBufferAllocator = std.heap.FixedBufferAllocator;
+const allocUpperString = std.ascii.allocUpperString;
 const parseIp = std.net.Address.parseIp;
 
 const Connection = @This();
@@ -25,16 +28,6 @@ arena_allocator: ArenaAllocator,
 state: State,
 stream: Network.Stream,
 connect_info: ConnectInfo,
-
-fn stream_read(context: *const anyopaque, buffer: []u8) anyerror!usize {
-    const connection: *const Connection = @ptrCast(@alignCast(context));
-    return try connection.stream.read(buffer);
-}
-
-fn stream_write(context: *const anyopaque, bytes: []const u8) anyerror!usize {
-    const connection: *const Connection = @ptrCast(@alignCast(context));
-    return connection.stream.write(bytes);
-}
 
 pub fn connect(allocator: Allocator, connect_info: ConnectInfo) !Connection {
     const stream = try Network.tcpConnectToHost(allocator, connect_info.host, connect_info.port);
@@ -175,38 +168,36 @@ pub fn query(
     return data_reader.map(T, allocator);
 }
 
-// TODO: Maybe rename to extended query i dunno
 pub fn prepare(self: *Connection, statement: []const u8, parameters: anytype) !*DataReader {
     switch (self.state) {
         .ready => {
-            const ByteArrayList = ArrayList(?[]const u8);
+            const allocator = self.arena_allocator.allocator();
 
-            var arena_allocator = ArenaAllocator.init(self.allocator);
-            defer arena_allocator.deinit();
+            const data = try Types.to_row(
+                allocator,
+                .text,
+                parameters,
+            );
+            defer data.deinit();
 
-            var byte_array_list = ByteArrayList.init(self.allocator);
-            defer byte_array_list.deinit();
-
-            // Parameters should be a tuple of values we convert to a list
-            switch (@typeInfo(@TypeOf(parameters))) {
-                .Struct => |strt| {
-                    // Only work with tuples for the minute
-                    if (!strt.is_tuple) @compileError("Expected tuple argument, found" ++ @typeName(parameters));
-
-                    inline for (strt.fields, 0..) |_, index| {
-                        const new_parameter = try Types.to_bytes(arena_allocator.allocator(), parameters[index]);
-                        try byte_array_list.append(new_parameter);
-                    }
-                },
-                else => @compileError("Expected tuple argument, found" ++ @typeName(parameters)),
-            }
-
-            const event_emitter = EventEmitter(DataReader.Event).init(self, &send_data_reader_event);
+            const data_reader_emitter = EventEmitter(
+                DataReader.Event,
+            ).init(
+                self,
+                &send_data_reader_event,
+            );
+            const copy_in_emitter = EventEmitter(
+                CopyIn.Event,
+            ).init(
+                self,
+                &send_copy_in_event,
+            );
 
             const query_state = Query{
                 .arena_allocator = &self.arena_allocator,
                 .state = .parse,
-                .emitter = event_emitter,
+                .data_reader_emitter = data_reader_emitter,
+                .copy_in_emitter = copy_in_emitter,
             };
 
             self.state = .{ .querying = query_state };
@@ -218,7 +209,7 @@ pub fn prepare(self: *Connection, statement: []const u8, parameters: anytype) !*
             try self.transition(.{ .querying = .read_parameter_description });
             try self.transition(.{ .querying = .read_row_description });
             try self.transition(.{ .querying = .read_ready_for_query });
-            try self.transition(.{ .querying = .{ .send_bind = byte_array_list.items } });
+            try self.transition(.{ .querying = .{ .send_bind = data.items } });
             try self.transition(.{ .querying = .send_execute });
             try self.transition(.{ .querying = .send_sync });
             try self.transition(.{ .querying = .read_bind_complete });
@@ -233,62 +224,58 @@ pub fn prepare(self: *Connection, statement: []const u8, parameters: anytype) !*
     }
 }
 
-// TODO: Rename and sort out to only use simple query
-// Needs to support being able to handle multiple queries and yadyadaaa
-// pub fn query(self: *Connection, statement: []const u8) !*DataReader {
-//     switch (self.state) {
-//         .ready => {
-//             const event_emitter = EventEmitter(DataReader.Event).init(self, &send_data_reader_event);
+pub fn copy_in(
+    self: *Connection,
+    buffer: []u8,
+    statement: []const u8,
+    parameters: anytype,
+) !*CopyIn {
+    switch (self.state) {
+        .ready => {
+            const allocator = self.arena_allocator.allocator();
 
-//             const query_state = Query{
-//                 .allocator = self.allocator,
-//                 .state = .{ .query = statement },
-//                 .emitter = event_emitter,
-//             };
+            const data = try Types.to_row(
+                allocator,
+                .text,
+                parameters,
+            );
+            defer data.deinit();
 
-//             self.state = .{ .querying = query_state };
+            const data_reader_emitter = EventEmitter(DataReader.Event).init(self, &send_data_reader_event);
+            const copy_in_emitter = EventEmitter(CopyIn.Event).init(self, &send_copy_in_event);
 
-//             try self.transition(.{ .querying = .send_query });
-//             try self.transition(.{ .querying = .read_query_response });
+            const query_state = Query{
+                .arena_allocator = &self.arena_allocator,
+                .state = .parse,
+                .data_reader_emitter = data_reader_emitter,
+                .copy_in_emitter = copy_in_emitter,
+            };
 
-//             switch (self.state.querying.state) {
-//                 .data_reader => |*data_reader| return data_reader,
-//                 .received_row_description => {
-//                     try self.transition(.{ .querying = .read_data_reader });
+            self.state = .{ .querying = query_state };
 
-//                     switch (self.state.querying.state) {
-//                         .data_reader => |*data_reader| return data_reader,
-//                         else => unreachable,
-//                     }
-//                 },
-//                 else => unreachable,
-//             }
-//         },
-//         .querying => |*current_query| {
-//             switch (current_query.state) {
-//                 .data_reader => |*data_reader| {
+            try self.transition(.{ .querying = .{ .send_parse = statement } });
+            try self.transition(.{ .querying = .send_describe });
+            try self.transition(.{ .querying = .send_sync });
+            try self.transition(.{ .querying = .read_parse_complete });
+            try self.transition(.{ .querying = .read_parameter_description });
+            try self.transition(.{ .querying = .read_row_description });
+            try self.transition(.{ .querying = .read_ready_for_query });
+            try self.transition(.{ .querying = .{ .send_bind = data.items } });
+            try self.transition(.{ .querying = .send_execute });
+            try self.transition(.{ .querying = .send_sync });
+            try self.transition(.{ .querying = .read_bind_complete });
+            try self.transition(.{ .querying = .{ .read_copy_in_response = buffer } });
 
-//                     // Drain current data_reader and ensure stream has been cleared
-//                     try data_reader.drain();
+            switch (self.state) {
+                .copy_in => |*cp_in| return cp_in,
+                else => unreachable,
+            }
+        },
+        else => unreachable,
+    }
+}
 
-//                     // Set state ready
-//                     self.state = .{ .ready = undefined };
-
-//                     // Recursive call probably better way to write it but too much haskell brain
-//                     return self.query(statement);
-//                 },
-//                 .error_response => |error_response| self.state = (.{ .error_response = error_response }),
-//                 else => unreachable,
-//             }
-//         },
-//         else => unreachable,
-//     }
-
-//     // For some reason the complier doesn't catch the ureachable in the switch
-//     unreachable;
-// }
-
-// TODO: Rewrite listen
+// TODO: Rewrite listener
 pub fn listen(self: *Connection, statement: []const u8, func: *const fn (event: Message.NotificationResponse) anyerror!void) !void {
     switch (self.state) {
         .ready => {
@@ -331,6 +318,16 @@ pub fn any_writer(self: *Connection) AnyWriter {
         .context = @ptrCast(self),
         .writeFn = &stream_write,
     };
+}
+
+fn stream_read(context: *const anyopaque, buffer: []u8) anyerror!usize {
+    const connection: *const Connection = @ptrCast(@alignCast(context));
+    return try connection.stream.read(buffer);
+}
+
+fn stream_write(context: *const anyopaque, bytes: []const u8) anyerror!usize {
+    const connection: *const Connection = @ptrCast(@alignCast(context));
+    return connection.stream.write(bytes);
 }
 
 fn transition(self: *Connection, event: Event) !void {
@@ -379,6 +376,9 @@ fn transition(self: *Connection, event: Event) !void {
                         .data_reader => |data_reader| {
                             self.state = .{ .data_reader = data_reader };
                         },
+                        .copy_in => |cp_in| {
+                            self.state = .{ .copy_in = cp_in };
+                        },
                         .error_response => |error_response| self.state = (.{ .error_response = error_response }),
                         else => {},
                     }
@@ -395,6 +395,24 @@ fn transition(self: *Connection, event: Event) !void {
                         .command_complete => {
                             self.state = (.{ .ready = undefined });
                             data_reader.* = undefined;
+                            _ = self.arena_allocator.reset(.free_all);
+                        },
+                        .error_response => |error_response| self.state = (.{ .error_response = error_response }),
+                        else => {},
+                    }
+                },
+                else => unreachable,
+            }
+        },
+        .copying_in => |copy_in_event| {
+            switch (self.state) {
+                .copy_in => |*cp_in| {
+                    try cp_in.transition(copy_in_event);
+
+                    switch (cp_in.state) {
+                        .command_complete => {
+                            self.state = (.{ .ready = undefined });
+                            cp_in.* = undefined;
                             _ = self.arena_allocator.reset(.free_all);
                         },
                         .error_response => |error_response| self.state = (.{ .error_response = error_response }),
@@ -431,6 +449,12 @@ fn send_data_reader_event(ptr: *anyopaque, event: DataReader.Event) !void {
     try connection.transition(.{ .data_reading = event });
 }
 
+fn send_copy_in_event(ptr: *anyopaque, event: CopyIn.Event) !void {
+    var connection: *Connection = @alignCast(@ptrCast(ptr));
+
+    try connection.transition(.{ .copying_in = event });
+}
+
 fn send_listening_event(ptr: *anyopaque, event: Listener.Event) !void {
     var connection: *Connection = @alignCast(@ptrCast(ptr));
 
@@ -441,11 +465,22 @@ pub const Event = union(enum) {
     authenticator: Authenticator.Event,
     querying: Query.Event,
     data_reading: DataReader.Event,
+    copying_in: CopyIn.Event,
     listening: Listener.Event,
     close: void,
 
     pub fn format(self: Event, _: anytype, _: anytype, writer: anytype) !void {
         try writer.writeAll("[EVENT]");
+        var buffer: [128]u8 = undefined;
+        var fixed_allocator = FixedBufferAllocator.init(&buffer);
+        defer fixed_allocator.reset();
+
+        const allocator = fixed_allocator.allocator();
+
+        _ = try writer.write("[");
+        try writer.writeAll(try allocUpperString(allocator, @tagName(self)));
+        _ = try writer.write("]");
+
         try Json.stringify(self, .{}, writer);
     }
 };
@@ -454,13 +489,24 @@ pub const State = union(enum) {
     authenticating: Authenticator,
     querying: Query,
     data_reader: DataReader,
+    copy_in: CopyIn,
     ready: void,
     closed: void,
     listening: Listener,
     error_response: Message.ErrorResponse,
 
     pub fn format(self: State, _: anytype, _: anytype, writer: anytype) !void {
+        var buffer: [128]u8 = undefined;
+        var fixed_allocator = FixedBufferAllocator.init(&buffer);
+        defer fixed_allocator.reset();
+
+        const allocator = fixed_allocator.allocator();
+
         try writer.writeAll("[STATE]");
+
+        _ = try writer.write("[");
+        try writer.writeAll(try allocUpperString(allocator, @tagName(self)));
+        _ = try writer.write("]");
 
         switch (self) {
             .error_response => |error_response| {
@@ -474,6 +520,9 @@ pub const State = union(enum) {
             },
             .data_reader => |data_reader| {
                 try Json.stringify(data_reader.state, .{}, writer);
+            },
+            .copy_in => |cp_in| {
+                try Json.stringify(cp_in.state, .{}, writer);
             },
             .ready => {
                 try Json.stringify(@tagName(self), .{}, writer);

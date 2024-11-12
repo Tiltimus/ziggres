@@ -4,11 +4,9 @@ const Diagnostics = @import("diagnostics.zig");
 const Listener = @import("listener.zig");
 const Message = @import("message.zig");
 const Protocol = @import("protocol.zig");
-const Types = @import("types.zig");
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
 const ConnectInfo = Connection.ConnectInfo;
-const FixedBufferAllocator = std.heap.FixedBufferAllocator;
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -28,35 +26,38 @@ pub fn main() !void {
     var connection = try Connection.connect(allocator, connect_info);
     defer connection.close();
 
-    var buffer: [1400]u8 = undefined;
+    const sql =
+        \\CREATE TABLE IF NOT EXISTS public.test_table
+        \\(
+        \\ id serial NOT NULL,
+        \\ firstname character varying NOT NULL,
+        \\ lastname character varying NOT NULL,
+        \\ CONSTRAINT test_table_pkey PRIMARY KEY (id)
+        \\)
+    ;
 
-    var copier = try connection.copy_in(
-        &buffer,
-        "COPY test_table (firstname, lastname) FROM STDIN WITH (FORMAT text)",
+    try connection.execute(sql, .{});
+
+    try connection.delete("DELETE FROM test_table RETURNING id", .{});
+
+    try connection.insert("INSERT INTO test_table VALUES (DEFAULT, $1, $2)", .{ "hello", "world" });
+
+    const list = try connection.select(
+        TestTableRow,
+        allocator,
+        "SELECT * FROM test_table",
         .{},
     );
+    defer allocator.free(list);
 
-    for (0..1000) |_| {
-        try copier.write(TestTableRow{ .firstname = "Don", .lastname = "Trump" });
+    for (list) |item| {
+        allocator.free(item.firstname);
+        allocator.free(item.lastname);
     }
-
-    try copier.flush();
-
-    try copier.done();
 }
 
 const TestTableRow = struct {
     firstname: []const u8,
     lastname: []const u8,
+    id: i32,
 };
-
-pub const Something = union(enum) {
-    write_text: *anyopaque,
-};
-
-fn example(value: anytype) void {
-    const x: *anyopaque = @ptrCast(value);
-    const y = .{ .write_text = x };
-
-    std.log.debug("{any}", .{y});
-}
