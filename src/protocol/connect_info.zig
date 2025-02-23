@@ -1,6 +1,8 @@
-const Diagnostics = @import("diagnostics.zig");
+const std = @import("std");
+const StringHashMap = std.StringHashMap([]const u8);
+const File = std.fs.File;
 
-const ConnectInfo = @This();
+pub const ConnectInfo = @This();
 
 host: []const u8,
 port: u16,
@@ -8,7 +10,13 @@ username: []const u8,
 database: []const u8,
 password: []const u8,
 application_name: []const u8 = "zig",
-diagnostics: ?Diagnostics = null,
+options: ?StringHashMap = null,
+tls: Tls = .{ .no_tls = undefined },
+
+pub const Tls = union(enum) {
+    no_tls: void,
+    tls: File,
+};
 
 pub const default = ConnectInfo{
     .host = "127.0.0.1",
@@ -17,4 +25,5 @@ pub const default = ConnectInfo{
     .username = "postgres",
     .password = "postgres",
     .application_name = "zig",
+    .options = null,
 };

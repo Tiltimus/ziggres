@@ -1,111 +1,128 @@
 const std = @import("std");
-const Message = @import("./message.zig");
-const ArenaAllocator = std.heap.ArenaAllocator;
-const AnyReader = std.io.AnyReader;
-const AnyWriter = std.io.AnyWriter;
-const Address = std.net.Address;
-const Stream = std.net.Stream;
+pub const ConnectInfo = @import("protocol/connect_info.zig");
+pub const Backend = @import("protocol/backend.zig").Backend;
+pub const Frontend = @import("protocol/frontend.zig").Frontend;
+pub const Errors = @import("protocol/errors.zig");
+const GenericReader = @import("io/reader.zig").Reader;
+const GenericWriter = @import("io/writer.zig").Writer;
 const Allocator = std.mem.Allocator;
-
-context: *anyopaque,
-read_fn: *const fn (context: *anyopaque, buffer: []u8) anyerror!usize,
-write_fn: *const fn (context: *anyopaque, bytes: []const u8) anyerror!usize,
-connect_fn: *const fn (allocator: Allocator, name: []const u8, port: u16) anyerror!Protocol,
-close_fn: *const fn (context: *anyopaque) void,
+const Stream = std.net.Stream;
+const Network = std.net;
+const TlsClient = std.crypto.tls.Client;
+const Certificate = std.crypto.Certificate;
+const string_to_enum = std.meta.stringToEnum;
 
 const Protocol = @This();
 
-pub fn connect(self: Protocol, allocator: Allocator, name: []const u8, port: u16) !Protocol {
-    const protocol = try self.connect_fn(allocator, name, port);
+allocator: Allocator,
+stream: Stream,
+tls_client: ?std.crypto.tls.Client = null,
 
-    return protocol;
+pub const SupportsTls = enum(u1) {
+    S,
+    N,
+};
+
+pub const ReadError = anyerror; // Stream.ReadError || std.crypto.tls.Client.InitError(Stream);
+pub const WriteError = anyerror; // Stream.WriteError || std.crypto.tls.Client.InitError(Stream);
+pub const Reader = GenericReader(*Protocol, ReadError, read_fn);
+pub const Writer = GenericWriter(*Protocol, WriteError, write_fn);
+
+pub fn init(allocator: Allocator) Protocol {
+    return Protocol{
+        .allocator = allocator,
+        .stream = undefined,
+    };
+}
+
+pub fn connect(
+    self: *Protocol,
+    connect_info: ConnectInfo,
+) !void {
+    const stream = try Network.tcpConnectToHost(
+        self.allocator,
+        connect_info.host,
+        connect_info.port,
+    );
+    errdefer stream.close();
+
+    self.stream = stream;
+}
+
+pub fn read(self: *Protocol) !Backend {
+    const backend = try Backend.read(self.allocator, self.reader());
+
+    switch (backend) {
+        .error_response => |er| {
+            var iter = er.iterator();
+            defer er.deinit();
+
+            while (try iter.next()) |entry| {
+                if (entry[0] == 'C') {
+                    return Errors.code_to_error(entry[1]);
+                }
+            }
+
+            @panic("Unable to get SQLSTATE code from error response");
+        },
+        .notice_response => |nr| {
+            defer nr.deinit();
+
+            // TODO: Add option to log and pretty print
+            // std.log.warn("Notice Response: {s}", .{nr.buffer});
+
+            return self.read();
+        },
+        else => return backend,
+    }
+}
+
+pub fn read_supports_tls_byte(self: *Protocol) !SupportsTls {
+    var scribe = self.reader();
+    const byte: u8 = try scribe.readByte();
+
+    if (string_to_enum(SupportsTls, &[1]u8{byte})) |supports|
+        return supports;
+
+    @panic("Expected supports tls byte to be either S or N");
+}
+
+pub fn write(self: *Protocol, frontend: Frontend) !void {
+    return Frontend.write(
+        frontend,
+        self.allocator,
+        self.writer(),
+    );
 }
 
 pub fn close(self: Protocol) void {
-    self.close_fn(self.context);
+    self.stream.close();
 }
 
-pub fn read_message(self: Protocol, arena_allocator: *ArenaAllocator) !Message {
-    const reader = self.any_reader();
-
-    return try Message.read(reader, arena_allocator);
-}
-
-pub fn write_message(self: Protocol, message: Message) !void {
-    const writer = self.any_writer();
-
-    return try Message.write(message, writer);
-}
-
-pub fn any_reader(self: *Protocol) AnyReader {
-    return AnyReader{
-        .context = @ptrCast(self),
-        .readFn = &protocol_read,
+fn reader(self: *Protocol) Reader {
+    return Reader{
+        .context = self,
     };
 }
 
-pub fn any_writer(self: *Protocol) AnyWriter {
-    return AnyWriter{
-        .context = @ptrCast(self),
-        .writeFn = &protocol_write,
+fn writer(self: *Protocol) Writer {
+    return Writer{
+        .context = self,
     };
 }
 
-fn protocol_read(context: *anyopaque, buffer: []u8) !usize {
-    const protocol: *Protocol = @ptrCast(@alignCast(context));
-    return try protocol.read_fn(protocol.context, buffer);
+fn read_fn(self: *Protocol, buffer: []u8) !usize {
+    if (self.tls_client) |*tls_client| {
+        return tls_client.read(self.stream, buffer);
+    }
+
+    return try self.stream.read(buffer);
 }
 
-fn protocol_write(context: *anyopaque, bytes: []const u8) !usize {
-    const protocol: *Protocol = @ptrCast(@alignCast(context));
+fn write_fn(self: *Protocol, bytes: []const u8) !usize {
+    if (self.tls_client) |*tls_client| {
+        return tls_client.write(self.stream, bytes);
+    }
 
-    return try protocol.write_fn(protocol.context, bytes);
-}
-
-pub fn read(self: Protocol, buffer: []u8) !usize {
-    return try self.read_fn(self.context, buffer);
-}
-
-pub fn write(self: Protocol, bytes: []const u8) !usize {
-    return try self.write_fn(self.context, bytes);
-}
-
-pub fn net_stream() Protocol {
-    return Protocol{
-        .context = undefined,
-        .connect_fn = &connect_net_stream,
-        .read_fn = &read_net_stream,
-        .close_fn = &close_net_stream,
-        .write_fn = &write_net_stream,
-    };
-}
-
-pub fn connect_net_stream(allocator: Allocator, name: []const u8, port: u16) !Protocol {
-    var stream = try std.net.tcpConnectToHost(allocator, name, port);
-    errdefer stream.close();
-    std.log.debug("CONNECT: {any}", .{stream});
-
-    return Protocol{
-        .context = @ptrCast(&stream),
-        .connect_fn = &connect_net_stream,
-        .read_fn = &read_net_stream,
-        .close_fn = &close_net_stream,
-        .write_fn = &write_net_stream,
-    };
-}
-
-fn read_net_stream(context: *anyopaque, buffer: []u8) anyerror!usize {
-    const stream: *Stream = @ptrCast(@alignCast(context));
-    return try stream.read(buffer);
-}
-
-fn write_net_stream(context: *anyopaque, bytes: []const u8) anyerror!usize {
-    const stream: *Stream = @ptrCast(@alignCast(context));
-    std.log.debug("{any}", .{stream});
-    return stream.write(bytes);
-}
-
-fn close_net_stream(context: *anyopaque) void {
-    const stream: *Stream = @ptrCast(@alignCast(context));
-    stream.close();
+    return try self.stream.write(bytes);
 }

@@ -6,22 +6,16 @@ services:
       dockerfile: Dockerfile
     volumes:
       - .:/workspace
-    ports:
-      - "3000:3000"
+    network_mode: "host"
     depends_on:
-      - db
+      - postgres
       
-  db:
+  postgres:
     image: postgres:17
+    network_mode: "host"
     environment:
-      POSTGRES_USER: root
       POSTGRES_PASSWORD: G7TWaw4aTmGS 
-      POSTGRES_DB: ziggres
-      POSTGRES_INITDB_ARGS: --auth-host=scram-sha-256
     ports:
-      - "5433:5432"
+      - 5433:5433
     volumes:
-      - postgres_data:/var/lib/postgresql/data
-
-volumes:
-  postgres_data:
+      - ./docker/sql_setup.sh:/docker-entrypoint-initdb.d/sql_setup.sh
