@@ -3,13 +3,15 @@ pub const ConnectInfo = @import("protocol/connect_info.zig");
 pub const Backend = @import("protocol/backend.zig").Backend;
 pub const Frontend = @import("protocol/frontend.zig").Frontend;
 pub const Errors = @import("protocol/errors.zig");
-const GenericReader = @import("io/reader.zig").Reader;
-const GenericWriter = @import("io/writer.zig").Writer;
+const GenericWriter = std.io.GenericWriter;
+const GenericReader = std.io.GenericReader;
 const Allocator = std.mem.Allocator;
 const Stream = std.net.Stream;
 const Network = std.net;
 const TlsClient = std.crypto.tls.Client;
 const Certificate = std.crypto.Certificate;
+const Endian = std.mem.Endian;
+const memWriteInt = std.mem.writeInt;
 const string_to_enum = std.meta.stringToEnum;
 
 const Protocol = @This();
@@ -24,8 +26,9 @@ pub const SupportsTls = enum(u1) {
 };
 
 pub const ReadError = anyerror; // Stream.ReadError || std.crypto.tls.Client.InitError(Stream);
-pub const WriteError = anyerror; // Stream.WriteError || std.crypto.tls.Client.InitError(Stream);
 pub const Reader = GenericReader(*Protocol, ReadError, read_fn);
+
+pub const WriteError = anyerror;
 pub const Writer = GenericWriter(*Protocol, WriteError, write_fn);
 
 pub fn init(allocator: Allocator) Protocol {

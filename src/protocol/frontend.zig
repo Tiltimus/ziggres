@@ -72,11 +72,20 @@ pub const Frontend = union(enum) {
             var payload_iterator = self.iterator();
 
             while (payload_iterator.next()) |entry| {
-                _ = try writer.writeCstr(entry.key_ptr.*);
-                _ = try writer.writeCstr(entry.value_ptr.*);
+                if (entry.key_ptr.len != 0) {
+                    _ = try writer.write(entry.key_ptr.*);
+                }
+
+                try writer.writeByte(0);
+
+                if (entry.value_ptr.len != 0) {
+                    _ = try writer.write(entry.value_ptr.*);
+                }
+
+                try writer.writeByte(0);
             }
 
-            try writer.writeNullByte();
+            try writer.writeByte(0);
         }
 
         pub fn set_user(self: *StartupMessage, user: []const u8) !void {
@@ -347,7 +356,12 @@ pub const Frontend = union(enum) {
 
             try writer.writeByte('p');
             try writer.writeInt(i32, @intCast(payload_len), .big);
-            _ = try writer.writeCstr(self.password);
+
+            if (self.password.len != 0) {
+                _ = try writer.write(self.password);
+            }
+
+            try writer.writeByte(0);
         }
     };
 
@@ -359,7 +373,12 @@ pub const Frontend = union(enum) {
 
             try writer.writeByte('Q');
             try writer.writeInt(i32, @intCast(payload_len), .big);
-            _ = try writer.writeCstr(self.statement);
+
+            if (self.statement.len != 0) {
+                _ = try writer.write(self.statement);
+            }
+
+            try writer.writeByte(0);
         }
     };
 
@@ -372,8 +391,17 @@ pub const Frontend = union(enum) {
 
             try writer.writeByte('P');
             try writer.writeInt(i32, @intCast(payload_len), .big);
-            _ = try writer.writeCstr(self.name);
-            _ = try writer.writeCstr(self.statement);
+
+            if (self.name.len != 0) {
+                _ = try writer.write(self.name);
+            }
+            try writer.writeByte(0);
+
+            if (self.statement.len != 0) {
+                _ = try writer.write(self.statement);
+            }
+
+            try writer.writeByte(0);
 
             // TODO: At some point i would like to use comptime to compile
             // check object ids from the db and use that
@@ -396,7 +424,11 @@ pub const Frontend = union(enum) {
                 .portal => try writer.writeByte('P'),
             }
 
-            _ = try writer.writeCstr(self.name);
+            if (self.name.len != 0) {
+                _ = try writer.write(self.name);
+            }
+
+            try writer.writeByte(0);
         }
     };
 
@@ -426,8 +458,18 @@ pub const Frontend = union(enum) {
 
             try writer.writeByte('B');
             try writer.writeInt(i32, @intCast(payload_len), .big);
-            _ = try writer.writeCstr(self.portal_name);
-            _ = try writer.writeCstr(self.statement_name);
+
+            if (self.portal_name.len != 0) {
+                _ = try writer.write(self.portal_name);
+            }
+
+            try writer.writeByte(0);
+
+            if (self.statement_name.len != 0) {
+                _ = try writer.write(self.statement_name);
+            }
+
+            try writer.writeByte(0);
             try writer.writeInt(i16, 1, .big); // Number of parameter format codes
             try writer.writeInt(i16, @intFromEnum(self.format), .big);
             try writer.writeInt(i16, @intCast(self.parameters.len), .big); // Number of parameter format codes
@@ -457,7 +499,12 @@ pub const Frontend = union(enum) {
 
             try writer.writeByte('E');
             try writer.writeInt(i32, @intCast(payload_len), .big);
-            _ = try writer.writeCstr(self.portal_name);
+
+            if (self.portal_name.len != 0) {
+                _ = try writer.write(self.portal_name);
+            }
+
+            try writer.writeByte(0);
             try writer.writeInt(i32, self.rows, .big);
         }
     };
