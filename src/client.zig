@@ -100,26 +100,26 @@ pub fn close(self: *Client) void {
     self.state = .{ .closed = undefined };
 }
 
-pub fn query(self: *Client, statement: []const u8) !*DataReader {
+pub fn query(self: *Client, data_reader: *DataReader, statement: []const u8) !void {
     assert(self.state == .ready);
 
     self.state = .{ .querying = Query.init(self) };
 
     try self.transition(.{ .querying = .{ .send_query = statement } });
     try self.transition(.{ .querying = .{ .read_row_description = undefined } });
-    try self.transition(.{ .querying = .{ .read_data_reader = undefined } });
 
-    switch (self.state) {
-        .data_reader => |*dr| return dr,
-        else => unreachable,
-    }
+    data_reader.client = self;
+    data_reader.row_description = self.state.querying.row_description;
+
+    self.state = .{ .data_reader = data_reader };
 }
 
 pub fn prepare(
     self: *Client,
+    data_reader: *DataReader,
     statement: []const u8,
     parameters: []?[]const u8,
-) !*DataReader {
+) !void {
     assert(self.state == .ready);
 
     self.state = .{ .querying = Query.init(self) };
@@ -135,19 +135,19 @@ pub fn prepare(
     try self.transition(.{ .querying = .send_execute });
     try self.transition(.{ .querying = .send_sync });
     try self.transition(.{ .querying = .read_bind_complete });
-    try self.transition(.{ .querying = .read_data_reader });
 
-    switch (self.state) {
-        .data_reader => |data_reader| return data_reader,
-        else => unreachable,
-    }
+    data_reader.client = self;
+    data_reader.row_description = self.state.querying.row_description;
+
+    self.state = .{ .data_reader = data_reader };
 }
 
 pub fn copyIn(
     self: *Client,
+    copy_in: *CopyIn,
     statement: []const u8,
     parameters: []?[]const u8,
-) !*CopyIn {
+) !void {
     assert(self.state == .ready);
 
     self.state = .{ .querying = Query.init(self) };
@@ -163,19 +163,18 @@ pub fn copyIn(
     try self.transition(.{ .querying = .send_execute });
     try self.transition(.{ .querying = .send_sync });
     try self.transition(.{ .querying = .read_bind_complete });
-    try self.transition(.{ .querying = .read_copy_in });
 
-    switch (self.state) {
-        .copy_in => |cp_in| return cp_in,
-        else => unreachable,
-    }
+    copy_in.client = self;
+
+    self.state = .{ .copy_in = copy_in };
 }
 
 pub fn copyOut(
     self: *Client,
+    copy_out: *CopyOut,
     statement: []const u8,
     parameters: []?[]const u8,
-) !*CopyOut {
+) !void {
     assert(self.state == .ready);
 
     self.state = .{ .querying = Query.init(self) };
@@ -191,17 +190,18 @@ pub fn copyOut(
     try self.transition(.{ .querying = .send_execute });
     try self.transition(.{ .querying = .send_sync });
     try self.transition(.{ .querying = .read_bind_complete });
-    try self.transition(.{ .querying = .read_copy_out });
 
-    switch (self.state) {
-        .copy_out => |cp_out| return cp_out,
-        else => unreachable,
-    }
+    copy_out.client = self;
+    copy_out.buffer = ArrayList(u8).init(self.protocol.allocator);
+
+    self.state = .{ .copy_out = copy_out };
 }
 
 pub fn execute(self: *Client, statement: []const u8, parameters: []?[]const u8) !void {
-    var data_reader = try self.prepare(statement, parameters);
+    var data_reader: DataReader = .empty;
     defer data_reader.deinit();
+
+    try self.prepare(&data_reader, statement, parameters);
 
     try data_reader.drain();
 }
@@ -225,22 +225,7 @@ fn transition(self: *Client, event: Event) !void {
         },
         .querying => |query_event| {
             switch (self.state) {
-                .querying => |*querier| {
-                    try querier.transition(query_event);
-
-                    switch (querier.state) {
-                        .data_reader => |dr| {
-                            self.state = .{ .data_reader = dr };
-                        },
-                        .copy_in => |ci| {
-                            self.state = .{ .copy_in = ci };
-                        },
-                        .copy_out => |co| {
-                            self.state = .{ .copy_out = co };
-                        },
-                        else => {},
-                    }
-                },
+                .querying => |*querier| try querier.transition(query_event),
                 else => unreachable,
             }
         },
@@ -587,9 +572,6 @@ const Query = struct {
         received_ready_for_query: void,
         received_bind_complete: void,
         received_no_data: void,
-        data_reader: *DataReader,
-        copy_in: *CopyIn,
-        copy_out: *CopyOut,
     };
 
     pub const Event = union(enum) {
@@ -604,9 +586,6 @@ const Query = struct {
         read_parameter_description: void,
         read_ready_for_query: void,
         read_bind_complete: void,
-        read_data_reader: void,
-        read_copy_in: void,
-        read_copy_out: void,
     };
 
     pub fn init(client: *Client) Query {
@@ -733,51 +712,11 @@ const Query = struct {
                     else => unreachable,
                 }
             },
-            .read_data_reader => {
-                self.state = .{
-                    .data_reader = try DataReader.init(
-                        self.client,
-                        self.row_description,
-                    ),
-                };
-            },
-            .read_copy_in => {
-                const message = try self.client.protocol.read();
-
-                switch (message) {
-                    .copy_in_response => |cir| {
-                        // TODO: May use CIR for different formats later
-                        defer cir.deinit();
-                        self.state = .{
-                            .copy_in = try CopyIn.init(
-                                self.client,
-                            ),
-                        };
-                    },
-                    else => unreachable,
-                }
-            },
-            .read_copy_out => {
-                const message = try self.client.protocol.read();
-
-                switch (message) {
-                    .copy_out_response => |cor| {
-                        // TODO: May use CIR for different formats later
-                        defer cor.deinit();
-                        self.state = .{
-                            .copy_out = try CopyOut.init(
-                                self.client,
-                            ),
-                        };
-                    },
-                    else => unreachable,
-                }
-            },
         }
     }
 };
 
-const DataReader = struct {
+pub const DataReader = struct {
     index: usize,
     client: *Client,
     state: DataReader.State,
@@ -785,7 +724,7 @@ const DataReader = struct {
 
     pub const State = union(enum) {
         idle: void,
-        data_row: Backend.DataRow,
+        row: Backend.DataRow.Row,
         complete: Backend.CommandComplete,
     };
 
@@ -793,26 +732,17 @@ const DataReader = struct {
         next,
     };
 
-    pub fn init(
-        client: *Client,
-        row_description: ?Backend.RowDescription,
-    ) !*DataReader {
-        var data_reader = try client.protocol.allocator.create(DataReader);
-
-        data_reader.index = 0;
-        data_reader.client = client;
-        data_reader.state = .{ .idle = undefined };
-        data_reader.row_description = row_description;
-
-        return data_reader;
-    }
+    pub const empty: DataReader = .{
+        .index = 0,
+        .client = undefined,
+        .state = .idle,
+        .row_description = null,
+    };
 
     pub fn deinit(self: *DataReader) void {
         if (self.row_description) |rd| {
             rd.deinit();
         }
-
-        self.client.protocol.allocator.destroy(self);
     }
 
     pub fn transition(self: *DataReader, event: DataReader.Event) !void {
@@ -824,7 +754,10 @@ const DataReader = struct {
 
                         switch (message) {
                             .data_row => |data_row| {
-                                self.state = .{ .data_row = data_row };
+                                const reader = self.client.protocol.reader();
+                                const row = try data_row.row(reader);
+
+                                self.state = .{ .row = row };
                             },
                             .command_complete => |command_complete| {
                                 const end_message = try self.client.protocol.read();
@@ -839,12 +772,15 @@ const DataReader = struct {
                             else => unreachable,
                         }
                     },
-                    .data_row => |_| {
+                    .row => |_| {
                         const message = try self.client.protocol.read();
 
                         switch (message) {
                             .data_row => |data_row| {
-                                self.state = .{ .data_row = data_row };
+                                const reader = self.client.protocol.reader();
+                                const row = try data_row.row(reader);
+
+                                self.state = .{ .row = row };
                                 self.index += 1;
                             },
                             .command_complete => |command_complete| {
@@ -866,11 +802,11 @@ const DataReader = struct {
         }
     }
 
-    pub fn next(self: *DataReader) !?*Backend.DataRow {
+    pub fn next(self: *DataReader) !?*Backend.DataRow.Row {
         try self.client.transition(.{ .data_reading = .next });
 
         switch (self.state) {
-            .data_row => |*dr| return dr,
+            .row => |*dr| return dr,
             .complete => return null,
             .idle => unreachable,
         }
@@ -881,7 +817,7 @@ const DataReader = struct {
     }
 };
 
-const CopyIn = struct {
+pub const CopyIn = struct {
     client: *Client,
     state: CopyIn.State,
 
@@ -894,20 +830,15 @@ const CopyIn = struct {
 
     pub const Event = union(enum) {
         write: []const u8,
-        done: void,
+        write_done: void,
+        read_copy_in_response: void,
+        read_command_complete: void,
     };
 
-    pub fn init(client: *Client) !*CopyIn {
-        var copy_in = try client.protocol.allocator.create(CopyIn);
-
-        copy_in.client = client;
-
-        return copy_in;
-    }
-
-    pub fn deinit(self: *CopyIn) void {
-        self.client.protocol.allocator.destroy(self);
-    }
+    pub const empty: CopyIn = .{
+        .client = undefined,
+        .state = .idle,
+    };
 
     pub fn transition(self: *CopyIn, event: CopyIn.Event) !void {
         switch (event) {
@@ -920,13 +851,22 @@ const CopyIn = struct {
 
                 self.state = .writing;
             },
-            .done => {
+            .write_done => {
                 const copy_done = Frontend.CopyDone{};
                 const sync = Frontend.Sync{};
 
                 try self.client.protocol.write(.{ .copy_done = copy_done });
                 try self.client.protocol.write(.{ .sync = sync });
+            },
+            .read_copy_in_response => {
+                const message = try self.client.protocol.read();
 
+                switch (message) {
+                    .copy_in_response => |copy_in_response| copy_in_response.deinit(),
+                    else => unreachable,
+                }
+            },
+            .read_command_complete => {
                 const message = try self.client.protocol.read();
 
                 switch (message) {
@@ -951,11 +891,13 @@ const CopyIn = struct {
     }
 
     pub fn done(self: *CopyIn) !void {
-        try self.client.transition(.{ .copying_in = .{ .done = undefined } });
+        try self.client.transition(.{ .copying_in = .{ .write_done = undefined } });
+        try self.client.transition(.{ .copying_in = .{ .read_copy_in_response = undefined } });
+        try self.client.transition(.{ .copying_in = .{ .read_command_complete = undefined } });
     }
 };
 
-const CopyOut = struct {
+pub const CopyOut = struct {
     client: *Client,
     state: CopyOut.State,
     buffer: ArrayList(u8),
@@ -970,18 +912,14 @@ const CopyOut = struct {
         read,
     };
 
-    pub fn init(client: *Client) !*CopyOut {
-        var copy_out = try client.protocol.allocator.create(CopyOut);
-
-        copy_out.client = client;
-        copy_out.buffer = ArrayList(u8).init(client.protocol.allocator);
-
-        return copy_out;
-    }
+    pub const empty: CopyOut = .{
+        .client = undefined,
+        .state = .idle,
+        .buffer = undefined,
+    };
 
     pub fn deinit(self: *CopyOut) void {
         self.buffer.deinit();
-        self.client.protocol.allocator.destroy(self);
     }
 
     pub fn transition(self: *CopyOut, event: CopyOut.Event) !void {
@@ -989,24 +927,23 @@ const CopyOut = struct {
             .read => {
                 const message = try self.client.protocol.read();
 
-                switch (message) {
-                    .copy_data => |cd| self.state = .{ .reading = cd },
+                to_complete: switch (message) {
+                    .copy_data => |cd| {
+                        self.state = .{ .reading = cd };
+                        return;
+                    },
                     .copy_done => {
-                        const next_message = try self.client.protocol.read();
-
-                        switch (next_message) {
-                            .command_complete => {
-                                const final_message = try self.client.protocol.read();
-
-                                switch (final_message) {
-                                    .ready_for_query => {
-                                        self.state = .complete;
-                                    },
-                                    else => unreachable,
-                                }
-                            },
-                            else => unreachable,
-                        }
+                        continue :to_complete try self.client.protocol.read();
+                    },
+                    .copy_out_response => |copy_out_response| {
+                        copy_out_response.deinit();
+                        continue :to_complete try self.client.protocol.read();
+                    },
+                    .command_complete => {
+                        continue :to_complete try self.client.protocol.read();
+                    },
+                    .ready_for_query => {
+                        self.state = .complete;
                     },
                     else => unreachable,
                 }

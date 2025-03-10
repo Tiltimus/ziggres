@@ -25,7 +25,7 @@ pub const SupportsTls = enum(u1) {
     N,
 };
 
-pub const ReadError = anyerror; // Stream.ReadError || std.crypto.tls.Client.InitError(Stream);
+pub const ReadError = anyerror;
 pub const Reader = GenericReader(*Protocol, ReadError, read_fn);
 
 pub const WriteError = anyerror;
@@ -102,13 +102,13 @@ pub fn close(self: Protocol) void {
     self.stream.close();
 }
 
-fn reader(self: *Protocol) Reader {
+pub fn reader(self: *Protocol) Reader {
     return Reader{
         .context = self,
     };
 }
 
-fn writer(self: *Protocol) Writer {
+pub fn writer(self: *Protocol) Writer {
     return Writer{
         .context = self,
     };

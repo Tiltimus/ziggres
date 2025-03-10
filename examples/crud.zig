@@ -13,7 +13,7 @@ test "tls crud" {
         firstname: []const u8,
         lastname: []const u8,
         email: ?[]const u8,
-        data_row: DataRow,
+        data_row: DataRow.Row,
 
         pub fn deinit(self: @This()) void {
             self.data_row.deinit();
@@ -74,8 +74,10 @@ test "tls crud" {
         \\ SELECT id, firstname, lastname, email FROM public.crud
     ;
 
-    var data_reader = try client.prepare(select_sql, &.{});
+    var data_reader: Client.DataReader = .empty;
     defer data_reader.deinit();
+
+    try client.prepare(&data_reader, select_sql, &.{});
 
     var users: [3]User = undefined;
     defer for (users) |user| user.deinit();
@@ -119,11 +121,14 @@ test "tls crud" {
 
     var select_updated = [_]?[]const u8{users[0].id};
 
-    var data_reader_2 = try client.prepare(
+    var data_reader_2: Client.DataReader = .empty;
+    defer data_reader_2.deinit();
+
+    try client.prepare(
+        &data_reader_2,
         "SELECT * FROM public.crud WHERE id = $1",
         &select_updated,
     );
-    defer data_reader_2.deinit();
 
     const data_row = try data_reader_2.next();
 

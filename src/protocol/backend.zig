@@ -570,57 +570,76 @@ pub const Backend = union(enum) {
         pub const TAG = 'D';
 
         allocator: Allocator,
+        size: i32,
         columns: i16,
-        buffer: []const u8,
-        cursor: u16,
 
-        pub fn get(self: *DataRow) ![]const u8 {
-            const optional = try self.get_optional();
+        pub const Row = struct {
+            allocator: Allocator,
+            columns: i16,
+            buffer: []const u8,
+            cursor: u16,
 
-            if (optional) |value| {
+            pub fn get(self: *Row) ![]const u8 {
+                const optional = try self.get_optional();
+
+                if (optional) |value| {
+                    return value;
+                } else {
+                    return error.UnexpectedNull;
+                }
+            }
+
+            pub fn get_optional(self: *Row) !?[]const u8 {
+                errdefer self.allocator.free(self.buffer);
+                if (self.cursor == self.buffer.len) return error.OutOfBounds;
+
+                var reader = BufferReader.bufferReader(self.buffer);
+
+                reader.pos = self.cursor;
+
+                const length = try reader.readInt(i32, .big);
+                var value: ?[]const u8 = null;
+
+                if (length != -1) {
+                    value = try reader.readAtleast(@intCast(length));
+                }
+
+                self.cursor = @intCast(reader.pos);
+
                 return value;
-            } else {
-                return error.UnexpectedNull;
-            }
-        }
-
-        pub fn get_optional(self: *DataRow) !?[]const u8 {
-            errdefer self.allocator.free(self.buffer);
-            if (self.cursor == self.buffer.len) return error.OutOfBounds;
-
-            var reader = BufferReader.bufferReader(self.buffer);
-
-            reader.pos = self.cursor;
-
-            const length = try reader.readInt(i32, .big);
-            var value: ?[]const u8 = null;
-
-            if (length != -1) {
-                value = try reader.readAtleast(@intCast(length));
             }
 
-            self.cursor = @intCast(reader.pos);
+            pub fn deinit(self: Row) void {
+                self.allocator.free(self.buffer);
+            }
+        };
 
-            return value;
+        pub const LazyRow = struct {};
+
+        pub fn row(self: DataRow, reader: anytype) !Row {
+            const buffer = try self.allocator.alloc(u8, @intCast(self.size - 6));
+
+            _ = try reader.read(buffer);
+
+            return Row{
+                .allocator = self.allocator,
+                .columns = self.columns,
+                .cursor = 0,
+                .buffer = buffer,
+            };
         }
+
+        // pub fn lazyRow(self: *LazyRow) !LazyRow {}
 
         pub fn read(allocator: Allocator, reader: anytype) !DataRow {
             const message_len = try reader.readInt(i32, .big);
             const columns = try reader.readInt(i16, .big);
-            const buffer = try allocator.alloc(u8, @intCast(message_len - 6));
-
-            _ = try reader.read(buffer);
 
             return DataRow{
                 .allocator = allocator,
                 .columns = columns,
-                .buffer = buffer,
-                .cursor = 0,
+                .size = message_len,
             };
-        }
-
-        pub fn deinit(self: DataRow) void {
-            self.allocator.free(self.buffer);
         }
     };
 
@@ -645,10 +664,14 @@ pub const Backend = union(enum) {
 
             pub fn from_str(str: []const u8) Command {
                 if (startsWith(u8, str, "INSERT")) return .insert;
-                if (startsWith(u8, str, "SELECT")) return .select;
-                if (startsWith(u8, str, "UPDATE")) return .update;
                 if (startsWith(u8, str, "DELETE")) return .delete;
+                if (startsWith(u8, str, "UPDATE")) return .update;
+                if (startsWith(u8, str, "MERGE")) return .merge;
+                if (startsWith(u8, str, "SELECT")) return .select;
+                if (startsWith(u8, str, "MOVE")) return .move;
+                if (startsWith(u8, str, "FETCH")) return .fetch;
                 if (startsWith(u8, str, "COPY")) return .copy;
+                if (startsWith(u8, str, "LISTEN")) return .listen;
                 if (startsWith(u8, str, "CREATE TABLE")) return .create_table;
 
                 @panic("Unexpected command type");
@@ -730,7 +753,46 @@ pub const Backend = union(enum) {
                         .oid = 0,
                     };
                 },
-                else => unreachable,
+                .merge => {
+                    _ = try bufferReader.readUntil(SPACE);
+                    const rows_str = try bufferReader.readCstr();
+                    const rows = try parseInt(i32, rows_str, 10);
+
+                    return CommandComplete{
+                        .command = .merge,
+                        .rows = rows,
+                        .oid = 0,
+                    };
+                },
+                .fetch => {
+                    _ = try bufferReader.readUntil(SPACE);
+                    const rows_str = try bufferReader.readCstr();
+                    const rows = try parseInt(i32, rows_str, 10);
+
+                    return CommandComplete{
+                        .command = .fetch,
+                        .rows = rows,
+                        .oid = 0,
+                    };
+                },
+                .move => {
+                    _ = try bufferReader.readUntil(SPACE);
+                    const rows_str = try bufferReader.readCstr();
+                    const rows = try parseInt(i32, rows_str, 10);
+
+                    return CommandComplete{
+                        .command = .move,
+                        .rows = rows,
+                        .oid = 0,
+                    };
+                },
+                .listen => {
+                    return CommandComplete{
+                        .command = .listen,
+                        .rows = 0,
+                        .oid = 0,
+                    };
+                },
             }
         }
     };
