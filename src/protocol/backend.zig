@@ -662,7 +662,7 @@ pub const Backend = union(enum) {
             listen,
             create_table,
 
-            pub fn from_str(str: []const u8) Command {
+            pub fn fromStr(str: []const u8) Command {
                 if (startsWith(u8, str, "INSERT")) return .insert;
                 if (startsWith(u8, str, "DELETE")) return .delete;
                 if (startsWith(u8, str, "UPDATE")) return .update;
@@ -688,7 +688,7 @@ pub const Backend = union(enum) {
             var bufferReader = BufferReader.bufferReader(buffer);
             defer allocator.free(buffer);
 
-            switch (Command.from_str(buffer)) {
+            switch (Command.fromStr(buffer)) {
                 .insert => {
                     _ = try bufferReader.readUntil(SPACE);
                     const oid_str = try bufferReader.readUntil(SPACE);

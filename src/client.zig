@@ -815,6 +815,13 @@ pub const DataReader = struct {
     pub fn drain(self: *DataReader) !void {
         while (try self.next()) |dr| dr.deinit();
     }
+
+    pub fn rows(self: DataReader) i32 {
+        switch (self.state) {
+            .complete => |command_complete| return command_complete.rows,
+            else => unreachable,
+        }
+    }
 };
 
 pub const CopyIn = struct {

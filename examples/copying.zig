@@ -5,12 +5,17 @@ const allocator = std.testing.allocator;
 const expect = std.testing.expect;
 
 test "copying" {
+    // TODO: Look into strange issue where after around 482ish copy data with TLSClient
+    // It start to give bad bytes back causing it to fail
+    // const cert = try std.fs.cwd().openFile("docker/postgres.crt", .{});
+
     const connect_info = ConnectInfo{
         .host = "localhost",
         .port = 5433,
         .database = "ziggres",
         .username = "scram_user",
         .password = "password",
+        // .tls = .{ .tls = cert },
     };
 
     var client = try Client.connect(allocator, connect_info);
