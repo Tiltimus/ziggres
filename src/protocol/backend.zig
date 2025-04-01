@@ -3,6 +3,7 @@ const Mechanism = @import("mechanism.zig").Mechanism;
 const Allocator = std.mem.Allocator;
 const Tuple = std.meta.Tuple;
 const Endian = std.builtin.Endian;
+const GenericReader = std.io.GenericReader;
 const base_64_decoder = std.base64.standard.Decoder;
 const eql = std.mem.eql;
 const parseInt = std.fmt.parseInt;
@@ -29,6 +30,7 @@ pub const Backend = union(enum) {
     copy_out_response: CopyOutResponse,
     copy_data: CopyData,
     copy_done: CopyDone,
+    portal_suspended: PortalSuspended,
 
     pub const BufferReader = struct {
         buffer: []const u8,
@@ -461,6 +463,8 @@ pub const Backend = union(enum) {
 
             _ = try reader.read(buffer);
 
+            std.log.err("Buffer: {s}", .{buffer});
+
             return ErrorResponse{
                 .allocator = allocator,
                 .buffer = buffer,
@@ -572,73 +576,56 @@ pub const Backend = union(enum) {
         allocator: Allocator,
         size: i32,
         columns: i16,
+        buffer: []const u8,
+        cursor: u16,
 
-        pub const Row = struct {
-            allocator: Allocator,
-            columns: i16,
-            buffer: []const u8,
-            cursor: u16,
+        pub fn get(self: *DataRow) ![]const u8 {
+            const opt = try self.optional();
 
-            pub fn get(self: *Row) ![]const u8 {
-                const optional = try self.get_optional();
-
-                if (optional) |value| {
-                    return value;
-                } else {
-                    return error.UnexpectedNull;
-                }
-            }
-
-            pub fn get_optional(self: *Row) !?[]const u8 {
-                errdefer self.allocator.free(self.buffer);
-                if (self.cursor == self.buffer.len) return error.OutOfBounds;
-
-                var reader = BufferReader.bufferReader(self.buffer);
-
-                reader.pos = self.cursor;
-
-                const length = try reader.readInt(i32, .big);
-                var value: ?[]const u8 = null;
-
-                if (length != -1) {
-                    value = try reader.readAtleast(@intCast(length));
-                }
-
-                self.cursor = @intCast(reader.pos);
-
+            if (opt) |value| {
                 return value;
+            } else {
+                return error.UnexpectedNull;
             }
-
-            pub fn deinit(self: Row) void {
-                self.allocator.free(self.buffer);
-            }
-        };
-
-        pub const LazyRow = struct {};
-
-        pub fn row(self: DataRow, reader: anytype) !Row {
-            const buffer = try self.allocator.alloc(u8, @intCast(self.size - 6));
-
-            _ = try reader.read(buffer);
-
-            return Row{
-                .allocator = self.allocator,
-                .columns = self.columns,
-                .cursor = 0,
-                .buffer = buffer,
-            };
         }
 
-        // pub fn lazyRow(self: *LazyRow) !LazyRow {}
+        pub fn optional(self: *DataRow) !?[]const u8 {
+            errdefer self.allocator.free(self.buffer);
+            if (self.cursor == self.buffer.len) return error.OutOfBounds;
+
+            var reader = BufferReader.bufferReader(self.buffer);
+
+            reader.pos = self.cursor;
+
+            const length = try reader.readInt(i32, .big);
+            var value: ?[]const u8 = null;
+
+            if (length != -1) {
+                value = try reader.readAtleast(@intCast(length));
+            }
+
+            self.cursor = @intCast(reader.pos);
+
+            return value;
+        }
+
+        pub fn deinit(self: DataRow) void {
+            self.allocator.free(self.buffer);
+        }
 
         pub fn read(allocator: Allocator, reader: anytype) !DataRow {
             const message_len = try reader.readInt(i32, .big);
             const columns = try reader.readInt(i16, .big);
+            const buffer = try allocator.alloc(u8, @intCast(message_len - 6));
+
+            _ = try reader.read(buffer);
 
             return DataRow{
                 .allocator = allocator,
                 .columns = columns,
+                .buffer = buffer,
                 .size = message_len,
+                .cursor = 0,
             };
         }
     };
@@ -661,6 +648,7 @@ pub const Backend = union(enum) {
             copy,
             listen,
             create_table,
+            other, // add the rest later
 
             pub fn fromStr(str: []const u8) Command {
                 if (startsWith(u8, str, "INSERT")) return .insert;
@@ -674,7 +662,7 @@ pub const Backend = union(enum) {
                 if (startsWith(u8, str, "LISTEN")) return .listen;
                 if (startsWith(u8, str, "CREATE TABLE")) return .create_table;
 
-                @panic("Unexpected command type");
+                return .other;
             }
         };
 
@@ -789,6 +777,13 @@ pub const Backend = union(enum) {
                 .listen => {
                     return CommandComplete{
                         .command = .listen,
+                        .rows = 0,
+                        .oid = 0,
+                    };
+                },
+                .other => {
+                    return CommandComplete{
+                        .command = .other,
                         .rows = 0,
                         .oid = 0,
                     };
@@ -1003,6 +998,16 @@ pub const Backend = union(enum) {
         }
     };
 
+    pub const PortalSuspended = struct {
+        pub const TAG = 's';
+
+        pub fn read(reader: anytype) !PortalSuspended {
+            _ = try reader.readInt(i32, .big);
+
+            return PortalSuspended{};
+        }
+    };
+
     pub fn read(allocator: Allocator, reader: anytype) !Backend {
         const message_type = try reader.readByte();
 
@@ -1133,6 +1138,13 @@ pub const Backend = union(enum) {
 
                 return Backend{
                     .copy_done = cd,
+                };
+            },
+            PortalSuspended.TAG => {
+                const ps = try PortalSuspended.read(reader);
+
+                return Backend{
+                    .portal_suspended = ps,
                 };
             },
             else => {

@@ -3,6 +3,7 @@ const Client = @import("ziggres");
 const ConnectInfo = Client.ConnectInfo;
 const allocator = std.testing.allocator;
 const expect = std.testing.expect;
+const UNNAMED = Client.UNNAMED;
 
 test "copying" {
     // TODO: Look into strange issue where after around 482ish copy data with TLSClient
@@ -42,12 +43,13 @@ test "copying" {
         \\ TO STDOUT WITH (FORMAT text)
     ;
 
-    try client.execute(table_sql, &.{});
-    try client.execute("DELETE FROM public.copy", &.{});
+    try client.execute(UNNAMED, table_sql, &.{});
+    try client.execute(UNNAMED, "DELETE FROM public.copy", &.{});
 
-    var copy_in: Client.CopyIn = .empty;
-
-    try client.copyIn(&copy_in, copy_in_sql, &.{});
+    var copy_in = try client.copyIn(
+        copy_in_sql,
+        &.{},
+    );
 
     for (0..1000) |_| {
         try copy_in.write("Firstname\tLastname\t-1\n");
@@ -55,10 +57,11 @@ test "copying" {
 
     try copy_in.done();
 
-    var copy_out: Client.CopyOut = .empty;
+    var copy_out = try client.copyOut(
+        copy_out_sql,
+        &.{},
+    );
     defer copy_out.deinit();
-
-    try client.copyOut(&copy_out, copy_out_sql, &.{});
 
     var count: usize = 0;
 

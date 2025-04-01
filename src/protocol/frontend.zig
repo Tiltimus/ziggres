@@ -32,9 +32,9 @@ pub const Frontend = union(enum) {
         portal,
     };
 
-    pub const Format = enum {
-        text,
-        binary,
+    pub const Format = enum(i16) {
+        text = 0,
+        binary = 1,
     };
 
     pub const StartupMessage = struct {
@@ -442,8 +442,9 @@ pub const Frontend = union(enum) {
     pub const Bind = struct {
         portal_name: []const u8,
         statement_name: []const u8,
+        parameter_format: Format,
+        result_format: Format,
         parameters: []?[]const u8,
-        format: Format,
 
         pub fn write(self: Bind, writer: anytype) !void {
             var payload_len = 16 + self.portal_name.len + self.statement_name.len;
@@ -470,8 +471,9 @@ pub const Frontend = union(enum) {
             }
 
             try writer.writeByte(0);
+
             try writer.writeInt(i16, 1, .big); // Number of parameter format codes
-            try writer.writeInt(i16, @intFromEnum(self.format), .big);
+            try writer.writeInt(i16, @intFromEnum(self.parameter_format), .big);
             try writer.writeInt(i16, @intCast(self.parameters.len), .big); // Number of parameter format codes
 
             // For each param write
@@ -486,7 +488,7 @@ pub const Frontend = union(enum) {
             }
 
             try writer.writeInt(i16, 1, .big);
-            try writer.writeInt(i16, 0, .big);
+            try writer.writeInt(i16, @intFromEnum(self.result_format), .big);
         }
     };
 

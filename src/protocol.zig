@@ -26,10 +26,10 @@ pub const SupportsTls = enum(u1) {
 };
 
 pub const ReadError = anyerror;
-pub const Reader = GenericReader(*Protocol, ReadError, read_fn);
+pub const Reader = GenericReader(*Protocol, ReadError, readFn);
 
 pub const WriteError = anyerror;
-pub const Writer = GenericWriter(*Protocol, WriteError, write_fn);
+pub const Writer = GenericWriter(*Protocol, WriteError, writeFn);
 
 pub fn init(allocator: Allocator) Protocol {
     return Protocol{
@@ -114,7 +114,7 @@ pub fn writer(self: *Protocol) Writer {
     };
 }
 
-fn read_fn(self: *Protocol, buffer: []u8) !usize {
+pub fn readFn(self: *Protocol, buffer: []u8) !usize {
     if (self.tls_client) |*tls_client| {
         return tls_client.read(self.stream, buffer);
     }
@@ -122,7 +122,7 @@ fn read_fn(self: *Protocol, buffer: []u8) !usize {
     return try self.stream.read(buffer);
 }
 
-fn write_fn(self: *Protocol, bytes: []const u8) !usize {
+pub fn writeFn(self: *Protocol, bytes: []const u8) !usize {
     if (self.tls_client) |*tls_client| {
         return tls_client.write(self.stream, bytes);
     }

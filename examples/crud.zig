@@ -6,6 +6,7 @@ const Allocator = std.mem.Allocator;
 const allocator = std.testing.allocator;
 const expectEqualStrings = std.testing.expectEqualStrings;
 const expect = std.testing.expect;
+const UNNAMED = Client.UNNAMED;
 
 test "tls crud" {
     const User = struct {
@@ -13,7 +14,7 @@ test "tls crud" {
         firstname: []const u8,
         lastname: []const u8,
         email: ?[]const u8,
-        data_row: DataRow.Row,
+        data_row: DataRow,
 
         pub fn deinit(self: @This()) void {
             self.data_row.deinit();
@@ -45,8 +46,8 @@ test "tls crud" {
         \\)
     ;
 
-    try client.execute(table_sql, &.{});
-    try client.execute("DELETE FROM public.crud", &.{});
+    try client.execute(UNNAMED, table_sql, &.{});
+    try client.execute(UNNAMED, "DELETE FROM public.crud", &.{});
 
     const insert_sql =
         \\ INSERT INTO public.crud
@@ -68,16 +69,18 @@ test "tls crud" {
         "threeemail@address.com",
     };
 
-    try client.execute(insert_sql, &params);
+    try client.execute(UNNAMED, insert_sql, &params);
 
     const select_sql =
         \\ SELECT id, firstname, lastname, email FROM public.crud
     ;
 
-    var data_reader: Client.DataReader = .empty;
+    var data_reader = try client.prepare(
+        UNNAMED,
+        select_sql,
+        &.{},
+    );
     defer data_reader.deinit();
-
-    try client.prepare(&data_reader, select_sql, &.{});
 
     var users: [3]User = undefined;
     defer for (users) |user| user.deinit();
@@ -86,7 +89,7 @@ test "tls crud" {
         const id = try data_row.get();
         const firstname = try data_row.get();
         const lastname = try data_row.get();
-        const email = try data_row.get_optional();
+        const email = try data_row.optional();
 
         users[data_reader.index] = User{
             .id = id,
@@ -115,20 +118,19 @@ test "tls crud" {
     };
 
     try client.execute(
+        UNNAMED,
         "UPDATE public.crud SET firstname = $1 WHERE id = $2",
         &update_params,
     );
 
     var select_updated = [_]?[]const u8{users[0].id};
 
-    var data_reader_2: Client.DataReader = .empty;
-    defer data_reader_2.deinit();
-
-    try client.prepare(
-        &data_reader_2,
+    var data_reader_2 = try client.prepare(
+        UNNAMED,
         "SELECT * FROM public.crud WHERE id = $1",
         &select_updated,
     );
+    defer data_reader_2.deinit();
 
     const data_row = try data_reader_2.next();
 

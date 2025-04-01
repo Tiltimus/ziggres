@@ -3,6 +3,8 @@ pub const Protocol = @import("protocol.zig");
 pub const ConnectInfo = @import("protocol/connect_info.zig");
 const Backend = @import("protocol/backend.zig").Backend;
 const Frontend = @import("protocol/frontend.zig").Frontend;
+const Format = Frontend.Format;
+const Target = Frontend.Target;
 const Allocator = std.mem.Allocator;
 const Tuple = std.meta.Tuple;
 const Certificate = std.crypto.Certificate;
@@ -10,30 +12,22 @@ const TlsClient = std.crypto.tls.Client;
 const ArrayList = std.ArrayList;
 const assert = std.debug.assert;
 
+pub const UNNAMED = "";
+
 const Client = @This();
 
 state: State,
 protocol: Protocol,
 connect_info: ConnectInfo,
 
-pub const State = union(enum) {
-    init: void,
-    authenticator: Authenticator,
-    querying: Query,
-    data_reader: *DataReader,
-    copy_in: *CopyIn,
-    copy_out: *CopyOut,
-    ready: void,
-    closed: void,
-    error_response: Backend.ErrorResponse,
-};
-
-pub const Event = union(enum) {
-    authenticator: Authenticator.Event,
-    querying: Query.Event,
-    data_reading: DataReader.Event,
-    copying_in: CopyIn.Event,
-    copying_out: CopyOut.Event,
+pub const State = enum(u8) {
+    authenticating,
+    querying,
+    data_reading,
+    copying_in,
+    copying_out,
+    ready,
+    closed,
 };
 
 pub fn connect(allocator: Allocator, connect_info: ConnectInfo) !Client {
@@ -42,244 +36,202 @@ pub fn connect(allocator: Allocator, connect_info: ConnectInfo) !Client {
     var client = Client{
         .protocol = protocol,
         .connect_info = connect_info,
-        .state = .init,
+        .state = .authenticating,
     };
 
-    client.state = .{ .authenticator = Authenticator.init(&client) };
+    var authenticator = Authenticator.init(&client);
 
     try client.protocol.connect(connect_info);
+    try authenticator.authenticate();
 
-    switch (connect_info.tls) {
-        .no_tls => try client.authenticate(),
-        .tls => {
-            try client.transition(.{ .authenticator = .send_tls_request });
-            try client.transition(.{ .authenticator = .read_supports_tls_byte });
-            try client.transition(.{ .authenticator = .tls_handshake });
-            try client.authenticate();
-        },
-    }
+    client.state = .ready;
 
     return client;
 }
 
-fn authenticate(self: *Client) !void {
-    try self.transition(.{ .authenticator = .send_startup_message });
-    try self.transition(.{ .authenticator = .read_authentication });
-
-    switch (self.state) {
-        .authenticator => |authenticator| {
-            switch (authenticator.state) {
-                .received_sasl => {
-                    try self.transition(.{ .authenticator = .send_sasl_initial_response });
-                    try self.transition(.{ .authenticator = .read_sasl_continue });
-                    try self.transition(.{ .authenticator = .send_sasl_response });
-                    try self.transition(.{ .authenticator = .read_sasl_final });
-                    try self.transition(.{ .authenticator = .read_authentication_ok });
-                    try self.transition(.{ .authenticator = .read_param_statuses_until_ready });
-                },
-                .received_clear_text_password => {
-                    try self.transition(.{ .authenticator = .send_password_message });
-                    try self.transition(.{ .authenticator = .read_authentication_ok });
-                    try self.transition(.{ .authenticator = .read_param_statuses_until_ready });
-                },
-                .received_md5_password => {
-                    try self.transition(.{ .authenticator = .send_password_message });
-                    try self.transition(.{ .authenticator = .read_authentication_ok });
-                    try self.transition(.{ .authenticator = .read_param_statuses_until_ready });
-                },
-                // TODO: Add support for other authentication paths
-                else => unreachable,
-            }
-        },
-        else => unreachable,
-    }
-}
-
 pub fn close(self: *Client) void {
     self.protocol.close();
-    self.state = .{ .closed = undefined };
+    self.state = .closed;
 }
 
-pub fn query(self: *Client, data_reader: *DataReader, statement: []const u8) !void {
+pub fn simple(self: *Client, statement: []const u8) !SimpleReader {
     assert(self.state == .ready);
 
-    self.state = .{ .querying = Query.init(self) };
+    self.state = .querying;
 
-    try self.transition(.{ .querying = .{ .send_query = statement } });
-    try self.transition(.{ .querying = .{ .read_row_description = undefined } });
+    var querying = Query.init(self);
 
-    data_reader.client = self;
-    data_reader.row_description = self.state.querying.row_description;
+    try querying.transition(.{ .send_query = statement });
 
-    self.state = .{ .data_reader = data_reader };
+    self.state = .data_reading;
+
+    return SimpleReader{
+        .index = 0,
+        .client = self,
+        .state = .idle,
+    };
+}
+
+pub fn extended(
+    self: *Client,
+    settings: ExtendedQuery,
+) !DataReader {
+    assert(self.state == .ready);
+
+    self.state = .querying;
+
+    var querying = Query.init(self);
+    const bind = settings.bind();
+    const exe = settings.execute();
+    const parse = settings.parse();
+    const describe = settings.describe(.statement);
+
+    try querying.transition(.{ .send_parse = parse });
+    try querying.transition(.{ .send_bind = bind });
+    try querying.transition(.{ .send_describe = describe });
+    try querying.transition(.{ .send_execute = exe });
+    try querying.transition(.send_sync);
+    try querying.transition(.read_parse_complete);
+    try querying.transition(.read_bind_complete);
+    try querying.transition(.read_parameter_description);
+    try querying.transition(.read_row_description);
+
+    self.state = .data_reading;
+
+    return DataReader{
+        .index = 0,
+        .client = self,
+        .state = .idle,
+        .row_description = querying.row_description,
+        .next_row_description = null,
+        .command_complete = null,
+        .limit = settings.rows,
+    };
 }
 
 pub fn prepare(
     self: *Client,
-    data_reader: *DataReader,
+    name: []const u8,
     statement: []const u8,
     parameters: []?[]const u8,
-) !void {
-    assert(self.state == .ready);
+) !DataReader {
+    const settings = ExtendedQuery{
+        .statement = statement,
+        .parameters = parameters,
+        .statement_name = name,
+    };
 
-    self.state = .{ .querying = Query.init(self) };
-
-    try self.transition(.{ .querying = .{ .send_parse = statement } });
-    try self.transition(.{ .querying = .send_describe });
-    try self.transition(.{ .querying = .send_sync });
-    try self.transition(.{ .querying = .read_parse_complete });
-    try self.transition(.{ .querying = .read_parameter_description });
-    try self.transition(.{ .querying = .read_row_description });
-    try self.transition(.{ .querying = .read_ready_for_query });
-    try self.transition(.{ .querying = .{ .send_bind = parameters } });
-    try self.transition(.{ .querying = .send_execute });
-    try self.transition(.{ .querying = .send_sync });
-    try self.transition(.{ .querying = .read_bind_complete });
-
-    data_reader.client = self;
-    data_reader.row_description = self.state.querying.row_description;
-
-    self.state = .{ .data_reader = data_reader };
+    return self.extended(settings);
 }
 
-pub fn copyIn(
+pub fn execute(
     self: *Client,
-    copy_in: *CopyIn,
+    name: []const u8,
     statement: []const u8,
     parameters: []?[]const u8,
 ) !void {
-    assert(self.state == .ready);
-
-    self.state = .{ .querying = Query.init(self) };
-
-    try self.transition(.{ .querying = .{ .send_parse = statement } });
-    try self.transition(.{ .querying = .send_describe });
-    try self.transition(.{ .querying = .send_sync });
-    try self.transition(.{ .querying = .read_parse_complete });
-    try self.transition(.{ .querying = .read_parameter_description });
-    try self.transition(.{ .querying = .read_row_description });
-    try self.transition(.{ .querying = .read_ready_for_query });
-    try self.transition(.{ .querying = .{ .send_bind = parameters } });
-    try self.transition(.{ .querying = .send_execute });
-    try self.transition(.{ .querying = .send_sync });
-    try self.transition(.{ .querying = .read_bind_complete });
-
-    copy_in.client = self;
-
-    self.state = .{ .copy_in = copy_in };
-}
-
-pub fn copyOut(
-    self: *Client,
-    copy_out: *CopyOut,
-    statement: []const u8,
-    parameters: []?[]const u8,
-) !void {
-    assert(self.state == .ready);
-
-    self.state = .{ .querying = Query.init(self) };
-
-    try self.transition(.{ .querying = .{ .send_parse = statement } });
-    try self.transition(.{ .querying = .send_describe });
-    try self.transition(.{ .querying = .send_sync });
-    try self.transition(.{ .querying = .read_parse_complete });
-    try self.transition(.{ .querying = .read_parameter_description });
-    try self.transition(.{ .querying = .read_row_description });
-    try self.transition(.{ .querying = .read_ready_for_query });
-    try self.transition(.{ .querying = .{ .send_bind = parameters } });
-    try self.transition(.{ .querying = .send_execute });
-    try self.transition(.{ .querying = .send_sync });
-    try self.transition(.{ .querying = .read_bind_complete });
-
-    copy_out.client = self;
-    copy_out.buffer = ArrayList(u8).init(self.protocol.allocator);
-
-    self.state = .{ .copy_out = copy_out };
-}
-
-pub fn execute(self: *Client, statement: []const u8, parameters: []?[]const u8) !void {
-    var data_reader: DataReader = .empty;
+    var data_reader = try self.prepare(
+        name,
+        statement,
+        parameters,
+    );
     defer data_reader.deinit();
-
-    try self.prepare(&data_reader, statement, parameters);
 
     try data_reader.drain();
 }
 
-fn transition(self: *Client, event: Event) !void {
-    switch (event) {
-        .authenticator => |auth_event| {
-            switch (self.state) {
-                .authenticator => |*authenticator| {
-                    try authenticator.transition(auth_event);
+pub fn copyIn(
+    self: *Client,
+    statement: []const u8,
+    parameters: []?[]const u8,
+) !CopyIn {
+    const settings = ExtendedQuery{
+        .statement = statement,
+        .parameters = parameters,
+    };
 
-                    switch (authenticator.state) {
-                        .authenticated => {
-                            self.state = (.{ .ready = undefined });
-                        },
-                        else => {},
-                    }
-                },
-                else => unreachable,
-            }
-        },
-        .querying => |query_event| {
-            switch (self.state) {
-                .querying => |*querier| try querier.transition(query_event),
-                else => unreachable,
-            }
-        },
-        .data_reading => |data_reader_event| {
-            switch (self.state) {
-                .data_reader => |dr| {
-                    try dr.transition(data_reader_event);
+    var data_reader = try self.extended(settings);
+    defer data_reader.deinit();
 
-                    switch (dr.state) {
-                        .complete => {
-                            self.state = .{ .ready = undefined };
-                        },
-                        else => {},
-                    }
-                },
-                else => unreachable,
-            }
-        },
-        .copying_in => |copy_in_event| {
-            switch (self.state) {
-                .copy_in => |cp| {
-                    try cp.transition(copy_in_event);
+    self.state = .copying_in;
 
-                    switch (cp.state) {
-                        .complete => {
-                            self.state = .{ .ready = undefined };
-                        },
-                        else => {},
-                    }
-                },
-                else => unreachable,
-            }
-        },
-        .copying_out => |copy_out_event| {
-            switch (self.state) {
-                .copy_out => |cp| {
-                    try cp.transition(copy_out_event);
-
-                    switch (cp.state) {
-                        .complete => {
-                            self.state = .{ .ready = undefined };
-                        },
-                        else => {},
-                    }
-                },
-                else => unreachable,
-            }
-        },
-    }
+    return CopyIn{
+        .client = self,
+        .state = .idle,
+    };
 }
 
+pub fn copyOut(
+    self: *Client,
+    statement: []const u8,
+    parameters: []?[]const u8,
+) !CopyOut {
+    const settings = ExtendedQuery{
+        .statement = statement,
+        .parameters = parameters,
+    };
+
+    var data_reader = try self.extended(settings);
+    defer data_reader.deinit();
+
+    self.state = .copying_out;
+
+    return CopyOut{
+        .client = self,
+        .state = .idle,
+        .buffer = ArrayList(u8).init(self.protocol.allocator),
+    };
+}
+
+pub const ExtendedQuery = struct {
+    statement: []const u8,
+    portal_name: []const u8 = "",
+    statement_name: []const u8 = "",
+    parameter_format: Format = .text,
+    result_format: Format = .text,
+    parameters: []?[]const u8 = &.{},
+    rows: i32 = 0,
+
+    pub fn bind(self: ExtendedQuery) Frontend.Bind {
+        return Frontend.Bind{
+            .parameter_format = self.parameter_format,
+            .result_format = self.result_format,
+            .parameters = self.parameters,
+            .portal_name = self.portal_name,
+            .statement_name = self.statement_name,
+        };
+    }
+
+    pub fn execute(self: ExtendedQuery) Frontend.Execute {
+        return Frontend.Execute{
+            .portal_name = self.portal_name,
+            .rows = self.rows,
+        };
+    }
+
+    pub fn parse(self: ExtendedQuery) Frontend.Parse {
+        return Frontend.Parse{
+            .name = self.statement_name,
+            .statement = self.statement,
+        };
+    }
+
+    pub fn describe(self: ExtendedQuery, target: Target) Frontend.Describe {
+        const name = if (target == .statement)
+            self.statement_name
+        else
+            self.portal_name;
+
+        return Frontend.Describe{
+            .name = name,
+            .target = target,
+        };
+    }
+};
+
 const Authenticator = struct {
-    state: Authenticator.State,
     client: *Client,
+    state: Authenticator.State,
 
     pub const Event = enum {
         send_tls_request,
@@ -551,6 +503,43 @@ const Authenticator = struct {
             },
         }
     }
+
+    pub fn authenticate(self: *Authenticator) !void {
+        switch (self.client.connect_info.tls) {
+            .tls => {
+                try self.transition(.send_tls_request);
+                try self.transition(.read_supports_tls_byte);
+                try self.transition(.tls_handshake);
+            },
+            .no_tls => {},
+        }
+
+        try self.transition(.send_startup_message);
+        try self.transition(.read_authentication);
+
+        switch (self.state) {
+            .received_sasl => {
+                try self.transition(.send_sasl_initial_response);
+                try self.transition(.read_sasl_continue);
+                try self.transition(.send_sasl_response);
+                try self.transition(.read_sasl_final);
+                try self.transition(.read_authentication_ok);
+                try self.transition(.read_param_statuses_until_ready);
+            },
+            .received_clear_text_password => {
+                try self.transition(.send_password_message);
+                try self.transition(.read_authentication_ok);
+                try self.transition(.read_param_statuses_until_ready);
+            },
+            .received_md5_password => {
+                try self.transition(.send_password_message);
+                try self.transition(.read_authentication_ok);
+                try self.transition(.read_param_statuses_until_ready);
+            },
+            // TODO: Add support for other authentication paths
+            else => unreachable,
+        }
+    }
 };
 
 const Query = struct {
@@ -576,10 +565,10 @@ const Query = struct {
 
     pub const Event = union(enum) {
         send_query: []const u8,
-        send_parse: []const u8,
-        send_describe: void,
-        send_bind: []?[]const u8,
-        send_execute: void,
+        send_parse: Frontend.Parse,
+        send_describe: Frontend.Describe,
+        send_bind: Frontend.Bind,
+        send_execute: Frontend.Execute,
         send_sync: void,
         read_row_description: void,
         read_parse_complete: void,
@@ -607,45 +596,23 @@ const Query = struct {
 
                 self.state = .{ .sent_query = undefined };
             },
-            .send_parse => |statement| {
-                const message = Frontend.Parse{
-                    .name = "",
-                    .statement = statement,
-                };
-
-                try self.client.protocol.write(.{ .parse = message });
+            .send_parse => |parse| {
+                try self.client.protocol.write(.{ .parse = parse });
 
                 self.state = .{ .sent_parse = undefined };
             },
-            .send_describe => {
-                const message = Frontend.Describe{
-                    .name = "",
-                    .target = .statement,
-                };
-
-                try self.client.protocol.write(.{ .describe = message });
+            .send_describe => |describe| {
+                try self.client.protocol.write(.{ .describe = describe });
 
                 self.state = .{ .sent_describe = undefined };
             },
             .send_bind => |bind| {
-                const message = Frontend.Bind{
-                    .format = .text,
-                    .parameters = bind,
-                    .portal_name = "",
-                    .statement_name = "",
-                };
-
-                try self.client.protocol.write(.{ .bind = message });
+                try self.client.protocol.write(.{ .bind = bind });
 
                 self.state = .{ .sent_bind = undefined };
             },
-            .send_execute => {
-                const message = Frontend.Execute{
-                    .portal_name = "",
-                    .rows = 0,
-                };
-
-                try self.client.protocol.write(.{ .execute = message });
+            .send_execute => |exe| {
+                try self.client.protocol.write(.{ .execute = exe });
 
                 self.state = .{ .sent_execute = undefined };
             },
@@ -663,9 +630,11 @@ const Query = struct {
                     .row_description => |rd| {
                         self.row_description = rd;
                         self.state = .{ .received_row_description = rd };
+                        return;
                     },
                     .no_data => {
                         self.state = .{ .received_no_data = undefined };
+                        return;
                     },
                     else => unreachable,
                 }
@@ -721,22 +690,19 @@ pub const DataReader = struct {
     client: *Client,
     state: DataReader.State,
     row_description: ?Backend.RowDescription,
+    command_complete: ?Backend.CommandComplete,
+    next_row_description: ?Backend.RowDescription,
+    limit: i32,
 
     pub const State = union(enum) {
         idle: void,
-        row: Backend.DataRow.Row,
-        complete: Backend.CommandComplete,
+        row: Backend.DataRow,
+        suspended: void,
+        complete: void,
     };
 
     pub const Event = enum {
         next,
-    };
-
-    pub const empty: DataReader = .{
-        .index = 0,
-        .client = undefined,
-        .state = .idle,
-        .row_description = null,
     };
 
     pub fn deinit(self: *DataReader) void {
@@ -752,63 +718,88 @@ pub const DataReader = struct {
                     .idle => {
                         const message = try self.client.protocol.read();
 
-                        switch (message) {
+                        to_complete: switch (message) {
                             .data_row => |data_row| {
-                                const reader = self.client.protocol.reader();
-                                const row = try data_row.row(reader);
-
-                                self.state = .{ .row = row };
+                                self.state = .{ .row = data_row };
+                                return;
+                            },
+                            .row_description => |rd| {
+                                self.row_description = rd;
+                                continue :to_complete try self.client.protocol.read();
                             },
                             .command_complete => |command_complete| {
-                                const end_message = try self.client.protocol.read();
+                                self.state = .complete;
+                                self.command_complete = command_complete;
 
-                                switch (end_message) {
-                                    .ready_for_query => {
-                                        self.state = .{ .complete = command_complete };
-                                    },
-                                    else => unreachable,
-                                }
+                                continue :to_complete try self.client.protocol.read();
+                            },
+                            .ready_for_query => {
+                                self.client.state = .ready;
+                                return;
                             },
                             else => unreachable,
                         }
                     },
-                    .row => |_| {
+                    .row => {
                         const message = try self.client.protocol.read();
 
-                        switch (message) {
+                        to_complete: switch (message) {
                             .data_row => |data_row| {
-                                const reader = self.client.protocol.reader();
-                                const row = try data_row.row(reader);
-
-                                self.state = .{ .row = row };
+                                self.state = .{ .row = data_row };
                                 self.index += 1;
+                                return;
                             },
                             .command_complete => |command_complete| {
-                                const end_message = try self.client.protocol.read();
+                                self.state = .complete;
+                                self.command_complete = command_complete;
 
-                                switch (end_message) {
-                                    .ready_for_query => {
-                                        self.state = .{ .complete = command_complete };
+                                continue :to_complete try self.client.protocol.read();
+                            },
+                            .portal_suspended => {
+                                self.state = .suspended;
+
+                                const exe = Frontend.Execute{
+                                    .portal_name = "",
+                                    .rows = self.limit,
+                                };
+
+                                try self.client.protocol.write(.{ .execute = exe });
+                                try self.client.protocol.write(.{ .sync = Frontend.Sync{} });
+
+                                continue :to_complete try self.client.protocol.read();
+                            },
+                            .ready_for_query => {
+                                switch (self.state) {
+                                    .suspended => {
+                                        continue :to_complete try self.client.protocol.read();
                                     },
-                                    else => unreachable,
+                                    else => {
+                                        self.client.state = .ready;
+                                        return;
+                                    },
                                 }
+                            },
+                            .row_description => |rd| {
+                                self.next_row_description = rd;
+                                return;
                             },
                             else => unreachable,
                         }
                     },
                     .complete => unreachable,
+                    .suspended => unreachable,
                 }
             },
         }
     }
 
-    pub fn next(self: *DataReader) !?*Backend.DataRow.Row {
-        try self.client.transition(.{ .data_reading = .next });
+    pub fn next(self: *DataReader) !?*Backend.DataRow {
+        try self.transition(.next);
 
         switch (self.state) {
             .row => |*dr| return dr,
             .complete => return null,
-            .idle => unreachable,
+            else => unreachable,
         }
     }
 
@@ -817,8 +808,74 @@ pub const DataReader = struct {
     }
 
     pub fn rows(self: DataReader) i32 {
+        if (self.command_complete) |cc| cc.rows else 0;
+    }
+};
+
+pub const SimpleReader = struct {
+    index: i32,
+    state: SimpleReader.State,
+    client: *Client,
+
+    pub const State = union(enum) {
+        idle: void,
+        data_reader: DataReader,
+        complete: void,
+    };
+
+    pub const Event = enum {
+        next,
+    };
+
+    pub fn transition(self: *SimpleReader, event: SimpleReader.Event) !void {
+        switch (event) {
+            .next => {
+                switch (self.state) {
+                    .idle => {
+                        const data_reader = DataReader{
+                            .index = 0,
+                            .client = self.client,
+                            .state = .idle,
+                            .row_description = null,
+                            .next_row_description = null,
+                            .command_complete = null,
+                            .limit = 0,
+                        };
+
+                        self.state = .{ .data_reader = data_reader };
+                    },
+                    .data_reader => |data_reader| {
+                        if (data_reader.next_row_description) |next_rd| {
+                            const next_data_reader = DataReader{
+                                .index = 0,
+                                .client = self.client,
+                                .state = .idle,
+                                .row_description = next_rd,
+                                .next_row_description = null,
+                                .command_complete = null,
+                                .limit = 0,
+                            };
+
+                            self.state = .{ .data_reader = next_data_reader };
+                            self.index += 1;
+                            return;
+                        }
+
+                        self.state = .complete;
+                        return;
+                    },
+                    .complete => unreachable,
+                }
+            },
+        }
+    }
+
+    pub fn next(self: *SimpleReader) !?*DataReader {
+        try self.transition(.next);
+
         switch (self.state) {
-            .complete => |command_complete| return command_complete.rows,
+            .data_reader => |*dr| return dr,
+            .complete => return null,
             else => unreachable,
         }
     }
@@ -883,6 +940,7 @@ pub const CopyIn = struct {
                         switch (next_message) {
                             .ready_for_query => {
                                 self.state = .complete;
+                                self.client.state = .ready;
                             },
                             else => unreachable,
                         }
@@ -894,13 +952,13 @@ pub const CopyIn = struct {
     }
 
     pub fn write(self: *CopyIn, bytes: []const u8) !void {
-        try self.client.transition(.{ .copying_in = .{ .write = bytes } });
+        try self.transition(.{ .write = bytes });
     }
 
     pub fn done(self: *CopyIn) !void {
-        try self.client.transition(.{ .copying_in = .{ .write_done = undefined } });
-        try self.client.transition(.{ .copying_in = .{ .read_copy_in_response = undefined } });
-        try self.client.transition(.{ .copying_in = .{ .read_command_complete = undefined } });
+        try self.transition(.{ .write_done = undefined });
+        try self.transition(.{ .read_copy_in_response = undefined });
+        try self.transition(.{ .read_command_complete = undefined });
     }
 };
 
@@ -951,6 +1009,7 @@ pub const CopyOut = struct {
                     },
                     .ready_for_query => {
                         self.state = .complete;
+                        self.client.state = .ready;
                     },
                     else => unreachable,
                 }
@@ -959,7 +1018,7 @@ pub const CopyOut = struct {
     }
 
     pub fn read(self: *CopyOut) !?Backend.CopyData {
-        try self.client.transition(.{ .copying_out = .read });
+        try self.transition(.read);
 
         switch (self.state) {
             .reading => |data| return data,
