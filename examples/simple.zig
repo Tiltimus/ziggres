@@ -46,12 +46,12 @@ test "simple" {
         \\ SELECT * FROM public.simple_table_two;
     ;
 
-    try client.execute(UNNAMED, table_sql_1, &.{});
-    try client.execute(UNNAMED, table_sql_2, &.{});
-    try client.execute(UNNAMED, "DELETE FROM public.simple_table_one", &.{});
-    try client.execute(UNNAMED, "DELETE FROM public.simple_table_two", &.{});
-    try client.execute(UNNAMED, insert_sql_1, &.{});
-    try client.execute(UNNAMED, insert_sql_2, &.{});
+    try client.execute(table_sql_1, &.{});
+    try client.execute(table_sql_2, &.{});
+    try client.execute("DELETE FROM public.simple_table_one", &.{});
+    try client.execute("DELETE FROM public.simple_table_two", &.{});
+    try client.execute(insert_sql_1, &.{});
+    try client.execute(insert_sql_2, &.{});
 
     var simple_reader = try client.simple(simple_query);
     var count: i32 = 0;

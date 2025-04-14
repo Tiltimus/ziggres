@@ -43,8 +43,8 @@ test "copying" {
         \\ TO STDOUT WITH (FORMAT text)
     ;
 
-    try client.execute(UNNAMED, table_sql, &.{});
-    try client.execute(UNNAMED, "DELETE FROM public.copy", &.{});
+    try client.execute(table_sql, &.{});
+    try client.execute("DELETE FROM public.copy", &.{});
 
     var copy_in = try client.copyIn(
         copy_in_sql,
@@ -61,7 +61,6 @@ test "copying" {
         copy_out_sql,
         &.{},
     );
-    defer copy_out.deinit();
 
     var count: usize = 0;
 

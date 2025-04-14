@@ -11,11 +11,11 @@ database: []const u8,
 password: []const u8,
 application_name: []const u8 = "zig",
 options: ?StringHashMap = null,
-tls: Tls = .{ .no_tls = undefined },
+tls: Tls = .no_tls,
 
-pub const Tls = union(enum) {
-    no_tls: void,
-    tls: File,
+pub const Tls = enum {
+    no_tls,
+    tls,
 };
 
 pub const default = ConnectInfo{

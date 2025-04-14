@@ -17,6 +17,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // At some point would like to have openssl as an option
+    // But sussing out how todo it is a bit of a nightmare
+    // ziggres.linkSystemLibrary("ssl", .{});
+    // ziggres.linkSystemLibrary("crypto", .{});
+
     lib_unit_tests.root_module.addImport("ziggres", ziggres);
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);

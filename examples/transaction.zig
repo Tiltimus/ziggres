@@ -9,16 +9,13 @@ const UNNAMED = Client.UNNAMED;
 const expectEqualStrings = std.testing.expectEqualStrings;
 const expect = std.testing.expect;
 
-test "batch" {
-    // const cert = try std.fs.cwd().openFile("docker/postgres.crt", .{});
-
+test "transaction" {
     const connect_info = ConnectInfo{
         .host = "localhost",
         .port = 5433,
         .database = "ziggres",
         .username = "scram_user",
         .password = "password",
-        // .tls = .{ .tls = cert },
     };
 
     var client = try Client.connect(allocator, connect_info);
@@ -31,17 +28,17 @@ test "batch" {
         \\)
     ;
 
-    try client.execute(UNNAMED, table_sql, &.{});
-    try client.execute(UNNAMED, "DELETE FROM public.batch", &.{});
+    try client.execute(table_sql, &.{});
+    try client.execute("DELETE FROM public.batch", &.{});
 
     const insert_sql =
         \\ INSERT INTO public.batch (id)
         \\ SELECT * FROM generate_series(1, 1000);
     ;
 
-    try client.execute(UNNAMED, insert_sql, &.{});
+    try client.execute(insert_sql, &.{});
 
-    _ = try client.execute(UNNAMED, "BEGIN", &.{});
+    try client.begin();
 
     const exetened_query = Client.ExtendedQuery{
         .statement = "SELECT * FROM public.batch",
@@ -58,7 +55,7 @@ test "batch" {
         count += 1;
     }
 
-    _ = try client.execute(UNNAMED, "COMMIT", &.{});
+    try client.rollback(null);
 
     try std.testing.expectEqual(1000, count);
 }

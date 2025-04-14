@@ -6,7 +6,6 @@ const Allocator = std.mem.Allocator;
 const allocator = std.testing.allocator;
 const expectEqualStrings = std.testing.expectEqualStrings;
 const expect = std.testing.expect;
-const UNNAMED = Client.UNNAMED;
 
 test "tls crud" {
     const User = struct {
@@ -21,15 +20,13 @@ test "tls crud" {
         }
     };
 
-    const cert = try std.fs.cwd().openFile("docker/postgres.crt", .{});
-
     const connect_info = ConnectInfo{
         .host = "localhost",
         .port = 5433,
         .database = "ziggres",
         .username = "scram_user",
         .password = "password",
-        .tls = .{ .tls = cert },
+        .tls = .tls,
     };
 
     var client = try Client.connect(allocator, connect_info);
@@ -46,8 +43,8 @@ test "tls crud" {
         \\)
     ;
 
-    try client.execute(UNNAMED, table_sql, &.{});
-    try client.execute(UNNAMED, "DELETE FROM public.crud", &.{});
+    try client.execute(table_sql, &.{});
+    try client.execute("DELETE FROM public.crud", &.{});
 
     const insert_sql =
         \\ INSERT INTO public.crud
@@ -69,14 +66,13 @@ test "tls crud" {
         "threeemail@address.com",
     };
 
-    try client.execute(UNNAMED, insert_sql, &params);
+    try client.execute(insert_sql, &params);
 
     const select_sql =
         \\ SELECT id, firstname, lastname, email FROM public.crud
     ;
 
     var data_reader = try client.prepare(
-        UNNAMED,
         select_sql,
         &.{},
     );
@@ -118,7 +114,6 @@ test "tls crud" {
     };
 
     try client.execute(
-        UNNAMED,
         "UPDATE public.crud SET firstname = $1 WHERE id = $2",
         &update_params,
     );
@@ -126,7 +121,6 @@ test "tls crud" {
     var select_updated = [_]?[]const u8{users[0].id};
 
     var data_reader_2 = try client.prepare(
-        UNNAMED,
         "SELECT * FROM public.crud WHERE id = $1",
         &select_updated,
     );

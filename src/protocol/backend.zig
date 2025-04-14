@@ -648,7 +648,7 @@ pub const Backend = union(enum) {
             copy,
             listen,
             create_table,
-            other, // add the rest later
+            other,
 
             pub fn fromStr(str: []const u8) Command {
                 if (startsWith(u8, str, "INSERT")) return .insert;

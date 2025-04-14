@@ -12,13 +12,13 @@ const TlsClient = std.crypto.tls.Client;
 const Certificate = std.crypto.Certificate;
 const Endian = std.mem.Endian;
 const memWriteInt = std.mem.writeInt;
-const string_to_enum = std.meta.stringToEnum;
+const stringToEnum = std.meta.stringToEnum;
 
 const Protocol = @This();
 
 allocator: Allocator,
 stream: Stream,
-tls_client: ?std.crypto.tls.Client = null,
+tls_client: ?TlsClient = null,
 
 pub const SupportsTls = enum(u1) {
     S,
@@ -84,7 +84,7 @@ pub fn read_supports_tls_byte(self: *Protocol) !SupportsTls {
     var scribe = self.reader();
     const byte: u8 = try scribe.readByte();
 
-    if (string_to_enum(SupportsTls, &[1]u8{byte})) |supports|
+    if (stringToEnum(SupportsTls, &[1]u8{byte})) |supports|
         return supports;
 
     @panic("Expected supports tls byte to be either S or N");

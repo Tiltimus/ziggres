@@ -10,10 +10,35 @@ const Tuple = std.meta.Tuple;
 const Certificate = std.crypto.Certificate;
 const TlsClient = std.crypto.tls.Client;
 const ArrayList = std.ArrayList;
+const Mutex = std.Thread.Mutex;
+const Condition = std.Thread.Condition;
+const allocPrint = std.fmt.allocPrint;
 const assert = std.debug.assert;
 
-pub const UNNAMED = "";
-
+/// Client
+/// Represents a database connection with methods for querying and transaction management
+/// Maintains connection state and protocol communication
+/// Fields:
+///  - state: Current connection state (authenticating, ready, etc.)
+///  - protocol: Handles low-level communication with the database
+///  - connect_info: Configuration details for the connection
+/// Example:
+///     const Client = @import("ziggres");
+///
+///     const allocator = std.heap.page_allocator;
+///     const info = ConnectInfo{
+///            .host = "<host>",
+///            .port = <port>,
+///            .database = "<database>",
+///            .username = "<username",
+///            .password = "<password>",
+///     };
+///
+///     var client = try Client.connect(allocator, info);
+///     defer client.close();
+///
+///     var reader = try client.simple("SELECT * FROM users");
+///     // Process results...
 const Client = @This();
 
 state: State,
@@ -30,6 +55,9 @@ pub const State = enum(u8) {
     closed,
 };
 
+/// Establishes a new client connection using the provided allocator and connection info
+/// Initializes the protocol and authentication process
+/// Returns a fully connected client in ready state
 pub fn connect(allocator: Allocator, connect_info: ConnectInfo) !Client {
     const protocol = Protocol.init(allocator);
 
@@ -49,11 +77,16 @@ pub fn connect(allocator: Allocator, connect_info: ConnectInfo) !Client {
     return client;
 }
 
+/// Closes the client connection
+/// Updates the client state to closed
 pub fn close(self: *Client) void {
     self.protocol.close();
     self.state = .closed;
 }
 
+/// Executes a simple query flow with the given statement
+/// https://www.postgresql.org/docs/8.1/protocol-flow.html#AEN60644 For more information
+/// Returns a SimpleReader for accessing query results essentially an iterator over the datareaders
 pub fn simple(self: *Client, statement: []const u8) !SimpleReader {
     assert(self.state == .ready);
 
@@ -72,6 +105,9 @@ pub fn simple(self: *Client, statement: []const u8) !SimpleReader {
     };
 }
 
+/// Executes an extended query flow with the specified settings
+/// https://www.postgresql.org/docs/8.1/protocol-flow.html#AEN60706 For more information
+/// Handles parse, bind, describe, and execute phases but also allows for fetching with portals / cursors
 pub fn extended(
     self: *Client,
     settings: ExtendedQuery,
@@ -109,29 +145,29 @@ pub fn extended(
     };
 }
 
+/// Prepares a statement with optional parameters, wraps the extended query for easier use
+/// If you want to specify prepared statement name for caching use extended
 pub fn prepare(
     self: *Client,
-    name: []const u8,
     statement: []const u8,
     parameters: []?[]const u8,
 ) !DataReader {
     const settings = ExtendedQuery{
         .statement = statement,
         .parameters = parameters,
-        .statement_name = name,
     };
 
     return self.extended(settings);
 }
 
+/// Executes a statement with optional parameters
+/// Wraps prepared and will automatically drain the datareader to completion
 pub fn execute(
     self: *Client,
-    name: []const u8,
     statement: []const u8,
     parameters: []?[]const u8,
 ) !void {
     var data_reader = try self.prepare(
-        name,
         statement,
         parameters,
     );
@@ -140,6 +176,55 @@ pub fn execute(
     try data_reader.drain();
 }
 
+/// Starts a new transaction by running an execute BEGIN command
+pub fn begin(self: *Client) !void {
+    try self.execute("BEGIN", &.{});
+}
+
+/// Commits a transaction by running an execute COMMIT command
+pub fn commit(self: *Client) !void {
+    try self.execute("COMMIT", &.{});
+}
+
+/// Creates a savepoint with a given name using execute
+pub fn savepoint(self: *Client, point: []const u8) !void {
+    try self.execute(
+        "SAVEPOINT $1",
+        &.{point},
+    );
+}
+
+/// Rolls back to a specific savepoint or entire transaction depending on the flow
+pub fn rollback(self: *Client, point: ?[]const u8) !void {
+    if (point) |value| {
+        const statement = "ROLLBACK TO SAVEPOINT $1";
+
+        var params = [_]?[]const u8{value};
+
+        try self.execute(
+            statement,
+            &params,
+        );
+    } else {
+        const statement = "ROLLBACK";
+
+        try self.execute(
+            statement,
+            &.{},
+        );
+    }
+}
+
+/// Releases a named savepoint executing a REALSE command
+pub fn release(self: *Client, point: []const u8) !void {
+    try self.execute(
+        "RELEASE $1",
+        &.{point},
+    );
+}
+
+/// Initiates a COPY IN operation for data import
+/// Returns a CopyIn struct for managing the data transfer
 pub fn copyIn(
     self: *Client,
     statement: []const u8,
@@ -161,6 +246,8 @@ pub fn copyIn(
     };
 }
 
+/// Initiates a COPY OUT operation for data export
+///Returns a CopyOut struct for managing the data transfer
 pub fn copyOut(
     self: *Client,
     statement: []const u8,
@@ -179,7 +266,6 @@ pub fn copyOut(
     return CopyOut{
         .client = self,
         .state = .idle,
-        .buffer = ArrayList(u8).init(self.protocol.allocator),
     };
 }
 
@@ -192,7 +278,7 @@ pub const ExtendedQuery = struct {
     parameters: []?[]const u8 = &.{},
     rows: i32 = 0,
 
-    pub fn bind(self: ExtendedQuery) Frontend.Bind {
+    fn bind(self: ExtendedQuery) Frontend.Bind {
         return Frontend.Bind{
             .parameter_format = self.parameter_format,
             .result_format = self.result_format,
@@ -202,21 +288,21 @@ pub const ExtendedQuery = struct {
         };
     }
 
-    pub fn execute(self: ExtendedQuery) Frontend.Execute {
+    fn execute(self: ExtendedQuery) Frontend.Execute {
         return Frontend.Execute{
             .portal_name = self.portal_name,
             .rows = self.rows,
         };
     }
 
-    pub fn parse(self: ExtendedQuery) Frontend.Parse {
+    fn parse(self: ExtendedQuery) Frontend.Parse {
         return Frontend.Parse{
             .name = self.statement_name,
             .statement = self.statement,
         };
     }
 
-    pub fn describe(self: ExtendedQuery, target: Target) Frontend.Describe {
+    fn describe(self: ExtendedQuery, target: Target) Frontend.Describe {
         const name = if (target == .statement)
             self.statement_name
         else
@@ -480,11 +566,11 @@ const Authenticator = struct {
             },
             .tls_handshake => {
                 switch (self.client.connect_info.tls) {
-                    .tls => |file| {
+                    .tls => {
                         var ca_bundle: Certificate.Bundle = Certificate.Bundle{};
                         defer ca_bundle.deinit(self.client.protocol.allocator);
 
-                        try ca_bundle.addCertsFromFile(self.client.protocol.allocator, file);
+                        try ca_bundle.rescan(self.client.protocol.allocator);
 
                         const tls_client = try TlsClient.init(
                             self.client.protocol.stream,
@@ -685,13 +771,30 @@ const Query = struct {
     }
 };
 
+/// Manages the reading of query results from a database operation
+/// Tracks state, row data, and metadata for result processing
+/// Provides methods for iterating through rows and accessing query metadata
 pub const DataReader = struct {
+    /// index: Current position in the result set
     index: usize,
+    /// Reference to the client to access the protocol
+    /// Note this can mean the datareader change the state of the client
     client: *Client,
+    /// Current state of the reader
     state: DataReader.State,
+    /// If the query performed returns a row description we will store
+    /// May perhaps use this to auto map to types. Played around with the idea made working with
+    /// the data more complicated than it needed to be. Much better the caller maps how they wish.
+    /// Also allows for the caller to decide if they wish to use binary or text
     row_description: ?Backend.RowDescription,
+    /// Command complete statement containing how rows where affect plus any other
+    /// meta data
     command_complete: ?Backend.CommandComplete,
+    /// For the simple query flow as every query will send a row description
+    /// When we hit it we know we are onto the next datareader and can pass it over.
+    /// Ideally it may be better for the SimpleReader to have its own datareader for this.
     next_row_description: ?Backend.RowDescription,
+    /// The amount of rows to fetch if it is a portal / cursor
     limit: i32,
 
     pub const State = union(enum) {
@@ -705,13 +808,18 @@ pub const DataReader = struct {
         next,
     };
 
+    /// Cleans up resources used by the DataReader
+    /// Will NOT automatically drain the rows must be done explicitly
+    /// If there is a row description it will be cleaned up
     pub fn deinit(self: *DataReader) void {
         if (self.row_description) |rd| {
             rd.deinit();
         }
     }
 
-    pub fn transition(self: *DataReader, event: DataReader.Event) !void {
+    /// Handles state transitions for reading query results
+    /// State machine next essentially
+    fn transition(self: *DataReader, event: DataReader.Event) !void {
         switch (event) {
             .next => {
                 switch (self.state) {
@@ -793,6 +901,9 @@ pub const DataReader = struct {
         }
     }
 
+    /// Retrieves the next data row from the query results
+    /// Returns a pointer to the Backend.DataRow or null if complete
+    /// Caller owns the memory and must call deinit to clear the internal buffer
     pub fn next(self: *DataReader) !?*Backend.DataRow {
         try self.transition(.next);
 
@@ -803,12 +914,21 @@ pub const DataReader = struct {
         }
     }
 
+    /// Consumes all remaining rows in the result set
+    /// Deinitializes each row as it's processed
+    /// Continues until the result set is exhausted
     pub fn drain(self: *DataReader) !void {
         while (try self.next()) |dr| dr.deinit();
     }
 
+    /// Returns the number of rows affected by the query
+    /// Must be called after the command has been drained and there are no more rows to return
+    /// If no rows 0 is returned
     pub fn rows(self: DataReader) i32 {
-        if (self.command_complete) |cc| cc.rows else 0;
+        if (self.command_complete) |cc|
+            return cc.rows
+        else
+            return 0;
     }
 };
 
@@ -965,7 +1085,6 @@ pub const CopyIn = struct {
 pub const CopyOut = struct {
     client: *Client,
     state: CopyOut.State,
-    buffer: ArrayList(u8),
 
     pub const State = union(enum) {
         idle,
@@ -980,12 +1099,7 @@ pub const CopyOut = struct {
     pub const empty: CopyOut = .{
         .client = undefined,
         .state = .idle,
-        .buffer = undefined,
     };
-
-    pub fn deinit(self: *CopyOut) void {
-        self.buffer.deinit();
-    }
 
     pub fn transition(self: *CopyOut, event: CopyOut.Event) !void {
         switch (event) {
@@ -1025,5 +1139,206 @@ pub const CopyOut = struct {
             .complete => return null,
             else => unreachable,
         }
+    }
+};
+
+pub const Pool = struct {
+    state: Pool.State,
+    allocator: Allocator,
+    connections: ArrayList(Connection),
+    max: u16,
+    min: u16,
+    timeout: u64,
+    attempts: u8,
+    connect_info: ConnectInfo,
+    mutex: Mutex,
+    condition: Condition,
+
+    const Connection = Tuple(&[_]type{ Pool.ConnectionState, *Client });
+
+    const ConnectionState = enum {
+        idle,
+        busy,
+    };
+
+    const State = enum {
+        open,
+        waiting,
+    };
+
+    pub const Settings = struct {
+        min: u16,
+        max: u16,
+        timeout: u64,
+        attempts: u8,
+
+        pub const default = Settings{
+            .min = 5,
+            .max = 15,
+            .timeout = 30_000_000_000,
+            .attempts = 3,
+        };
+    };
+
+    pub fn init(allocator: Allocator, connect_info: ConnectInfo, settings: Settings) !Pool {
+        assert(settings.max > settings.min);
+        assert(settings.max != 0);
+        assert(settings.min != 0);
+        assert(settings.attempts != 0);
+
+        var connections = try ArrayList(Connection).initCapacity(
+            allocator,
+            settings.min,
+        );
+
+        for (0..settings.min) |i| {
+            const client = try allocator.create(Client);
+
+            client.* = try Client.connect(
+                allocator,
+                connect_info,
+            );
+
+            try connections.insert(i, Connection{ .idle, client });
+        }
+
+        return Pool{
+            .state = .open,
+            .allocator = allocator,
+            .connections = connections,
+            .max = settings.max,
+            .min = settings.min,
+            .timeout = settings.timeout,
+            .attempts = settings.attempts,
+            .connect_info = connect_info,
+            .mutex = Mutex{},
+            .condition = Condition{},
+        };
+    }
+
+    pub fn acquire(self: *Pool) !*Client {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        var tries: u8 = 0;
+
+        grab: while (true) {
+            var first_idle: ?*Connection = null;
+
+            for (self.connections.items) |*item| {
+                if (item[0] == .idle) {
+                    first_idle = item;
+                    break;
+                }
+            }
+
+            // We found the client that was idle no need to see if
+            // should create a new client
+            if (first_idle) |connection| {
+                connection[0] = .busy;
+                return connection[1];
+            }
+
+            // Can we create a new if we can
+            if (self.connections.items.len < self.max) {
+
+                // Create a new connection and add it to the pool
+                const client = try self.allocator.create(Client);
+
+                client.* = try Client.connect(
+                    self.allocator,
+                    self.connect_info,
+                );
+
+                try self.connections.append(Connection{ .busy, client });
+
+                return client;
+            }
+
+            self.state = .waiting;
+            self.condition.timedWait(&self.mutex, self.timeout) catch |err| {
+                tries += 1;
+
+                if (tries >= self.attempts) {
+                    return err;
+                }
+            };
+
+            continue :grab;
+        }
+    }
+
+    pub fn release(self: *Pool, client: *Client) void {
+        assert(client.state == .ready);
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        for (self.connections.items, 0..) |*item, i| {
+            // If we are over the min and no other thread needs
+            // the connection we can destory it
+            if (item[1] == client) {
+                if (self.connections.items.len > self.min and self.state != .waiting) {
+                    _ = self.connections.orderedRemove(i);
+                    self.allocator.destroy(client);
+                    self.state = .open;
+                    break;
+                }
+                self.condition.broadcast();
+                item[0] = .idle;
+                self.state = .open;
+            }
+        }
+    }
+
+    pub fn execute(
+        self: *Pool,
+        statement: []const u8,
+        parameters: []?[]const u8,
+    ) !void {
+        var client = try self.acquire();
+        defer self.release(client);
+
+        return client.execute(statement, parameters);
+    }
+
+    pub fn prepare(
+        self: *Pool,
+        statement: []const u8,
+        parameters: []?[]const u8,
+    ) !DataReader {
+        var client = try self.acquire();
+        defer self.release(client);
+
+        return client.prepare(statement, parameters);
+    }
+
+    pub fn extended(
+        self: *Pool,
+        settings: ExtendedQuery,
+    ) !DataReader {
+        var client = try self.acquire();
+        defer self.release(client);
+
+        return client.extended(settings);
+    }
+
+    pub fn simple(
+        self: *Pool,
+        statement: []const u8,
+    ) !SimpleReader {
+        var client = try self.acquire();
+        defer self.release(client);
+
+        return client.simple(statement);
+    }
+
+    pub fn deinit(self: *Pool) void {
+        for (self.connections.items) |item| {
+            item[1].close();
+            self.allocator.destroy(item[1]);
+        }
+
+        self.connections.deinit();
     }
 };
