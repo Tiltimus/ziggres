@@ -7,7 +7,7 @@ const UNNAMED = Client.UNNAMED;
 
 test "copying" {
     // TODO: Look into strange issue where after around 482ish copy data with TLSClient
-    // It start to give bad bytes back causing it to fail
+    // It start to give bad bytes back causing it to fail (TLS)
     // const cert = try std.fs.cwd().openFile("docker/postgres.crt", .{});
 
     const connect_info = ConnectInfo{

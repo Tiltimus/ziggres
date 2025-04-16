@@ -613,7 +613,7 @@ pub const Backend = union(enum) {
             self.allocator.free(self.buffer);
         }
 
-        pub fn read(allocator: Allocator, reader: anytype) !DataRow {
+        fn read(allocator: Allocator, reader: anytype) !DataRow {
             const message_len = try reader.readInt(i32, .big);
             const columns = try reader.readInt(i16, .big);
             const buffer = try allocator.alloc(u8, @intCast(message_len - 6));
