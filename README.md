@@ -257,9 +257,9 @@ defer pool.release(client);
 
 ## Authentication Support
 
-Method | Description
-md5 | Don’t use this
-scram | SHA-256 is supported but SHA-256-PLUS is not yet available
-gss (GSSAPI) | Not supported
-sspi | Not supported
-kerberos | Not supported
+| Method | Description | 
+| md5 | Don’t use this | 
+| scram | SHA-256 is supported but SHA-256-PLUS is not yet available | 
+| gss (GSSAPI) | Not supported | 
+| sspi | Not supported |
+| kerberos | Not supported | 
