@@ -15,7 +15,6 @@ test "pool simple" {
         .database = "ziggres",
         .username = "scram_user",
         .password = "password",
-        .tls = .tls,
     };
 
     const settings = Client.Pool.Settings{
@@ -51,7 +50,6 @@ test "pool 100" {
         .database = "ziggres",
         .username = "scram_user",
         .password = "password",
-        // .tls = .tls,
     };
 
     var pool = try Client.Pool.init(

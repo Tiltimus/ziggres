@@ -29,7 +29,10 @@ test "tls crud" {
         .tls = .tls,
     };
 
-    var client = try Client.connect(allocator, connect_info);
+    var client = try Client.connect(
+        allocator,
+        connect_info,
+    );
     defer client.close();
 
     const table_sql =

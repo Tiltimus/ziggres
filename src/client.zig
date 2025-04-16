@@ -215,7 +215,7 @@ pub fn rollback(self: *Client, point: ?[]const u8) !void {
     }
 }
 
-/// Releases a named savepoint executing a REALSE command
+/// Releases a named savepoint executing a RELEASE command
 pub fn release(self: *Client, point: []const u8) !void {
     try self.execute(
         "RELEASE $1",
