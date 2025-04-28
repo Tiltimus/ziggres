@@ -39,235 +39,235 @@ const assert = std.debug.assert;
 ///
 ///     var reader = try client.simple("SELECT * FROM users");
 ///     // Process results...
-const Client = @This();
+pub const Client = struct {
+    state: State,
+    protocol: Protocol,
+    connect_info: ConnectInfo,
 
-state: State,
-protocol: Protocol,
-connect_info: ConnectInfo,
-
-pub const State = enum(u8) {
-    authenticating,
-    querying,
-    data_reading,
-    copying_in,
-    copying_out,
-    ready,
-    closed,
-};
-
-/// Establishes a new client connection using the provided allocator and connection info
-/// Initializes the protocol and authentication process
-/// Returns a fully connected client in ready state
-pub fn connect(allocator: Allocator, connect_info: ConnectInfo) !Client {
-    const protocol = Protocol.init(allocator);
-
-    var client = Client{
-        .protocol = protocol,
-        .connect_info = connect_info,
-        .state = .authenticating,
+    pub const State = enum(u8) {
+        authenticating,
+        querying,
+        data_reading,
+        copying_in,
+        copying_out,
+        ready,
+        closed,
     };
 
-    var authenticator = Authenticator.init(&client);
+    /// Establishes a new client connection using the provided allocator and connection info
+    /// Initializes the protocol and authentication process
+    /// Returns a fully connected client in ready state
+    pub fn connect(allocator: Allocator, connect_info: ConnectInfo) !Client {
+        const protocol = Protocol.init(allocator);
 
-    try client.protocol.connect(connect_info);
-    try authenticator.authenticate();
+        var client = Client{
+            .protocol = protocol,
+            .connect_info = connect_info,
+            .state = .authenticating,
+        };
 
-    client.state = .ready;
+        var authenticator = Authenticator.init(&client);
 
-    return client;
-}
+        try client.protocol.connect(connect_info);
+        try authenticator.authenticate();
 
-/// Closes the client connection
-/// Updates the client state to closed
-pub fn close(self: *Client) void {
-    self.protocol.close();
-    self.state = .closed;
-}
+        client.state = .ready;
 
-/// Executes a simple query flow with the given statement
-/// https://www.postgresql.org/docs/8.1/protocol-flow.html#AEN60644 For more information
-/// Returns a SimpleReader for accessing query results essentially an iterator over the datareaders
-pub fn simple(self: *Client, statement: []const u8) !SimpleReader {
-    assert(self.state == .ready);
+        return client;
+    }
 
-    self.state = .querying;
+    /// Closes the client connection
+    /// Updates the client state to closed
+    pub fn close(self: *Client) void {
+        self.protocol.close();
+        self.state = .closed;
+    }
 
-    var querying = Query.init(self);
+    /// Executes a simple query flow with the given statement
+    /// https://www.postgresql.org/docs/8.1/protocol-flow.html#AEN60644 For more information
+    /// Returns a SimpleReader for accessing query results essentially an iterator over the datareaders
+    pub fn simple(self: *Client, statement: []const u8) !SimpleReader {
+        assert(self.state == .ready);
 
-    try querying.transition(.{ .send_query = statement });
+        self.state = .querying;
 
-    self.state = .data_reading;
+        var querying = Query.init(self);
 
-    return SimpleReader{
-        .index = 0,
-        .client = self,
-        .state = .idle,
-    };
-}
+        try querying.transition(.{ .send_query = statement });
 
-/// Executes an extended query flow with the specified settings
-/// https://www.postgresql.org/docs/8.1/protocol-flow.html#AEN60706 For more information
-/// Handles parse, bind, describe, and execute phases but also allows for fetching with portals / cursors
-pub fn extended(
-    self: *Client,
-    settings: ExtendedQuery,
-) !DataReader {
-    assert(self.state == .ready);
+        self.state = .data_reading;
 
-    self.state = .querying;
+        return SimpleReader{
+            .index = 0,
+            .client = self,
+            .state = .idle,
+        };
+    }
 
-    var querying = Query.init(self);
-    const bind = settings.bind();
-    const exe = settings.execute();
-    const parse = settings.parse();
-    const describe = settings.describe(.statement);
+    /// Executes an extended query flow with the specified settings
+    /// https://www.postgresql.org/docs/8.1/protocol-flow.html#AEN60706 For more information
+    /// Handles parse, bind, describe, and execute phases but also allows for fetching with portals / cursors
+    pub fn extended(
+        self: *Client,
+        settings: ExtendedQuery,
+    ) !DataReader {
+        assert(self.state == .ready);
 
-    try querying.transition(.{ .send_parse = parse });
-    try querying.transition(.{ .send_bind = bind });
-    try querying.transition(.{ .send_describe = describe });
-    try querying.transition(.{ .send_execute = exe });
-    try querying.transition(.send_sync);
-    try querying.transition(.read_parse_complete);
-    try querying.transition(.read_bind_complete);
-    try querying.transition(.read_parameter_description);
-    try querying.transition(.read_row_description);
+        self.state = .querying;
 
-    self.state = .data_reading;
+        var querying = Query.init(self);
+        const bind = settings.bind();
+        const exe = settings.execute();
+        const parse = settings.parse();
+        const describe = settings.describe(.statement);
 
-    return DataReader{
-        .index = 0,
-        .client = self,
-        .state = .idle,
-        .row_description = querying.row_description,
-        .next_row_description = null,
-        .command_complete = null,
-        .limit = settings.rows,
-    };
-}
+        try querying.transition(.{ .send_parse = parse });
+        try querying.transition(.{ .send_bind = bind });
+        try querying.transition(.{ .send_describe = describe });
+        try querying.transition(.{ .send_execute = exe });
+        try querying.transition(.send_sync);
+        try querying.transition(.read_parse_complete);
+        try querying.transition(.read_bind_complete);
+        try querying.transition(.read_parameter_description);
+        try querying.transition(.read_row_description);
 
-/// Prepares a statement with optional parameters, wraps the extended query for easier use
-/// If you want to specify prepared statement name for caching use extended
-pub fn prepare(
-    self: *Client,
-    statement: []const u8,
-    parameters: []?[]const u8,
-) !DataReader {
-    const settings = ExtendedQuery{
-        .statement = statement,
-        .parameters = parameters,
-    };
+        self.state = .data_reading;
 
-    return self.extended(settings);
-}
+        return DataReader{
+            .index = 0,
+            .client = self,
+            .state = .idle,
+            .row_description = querying.row_description,
+            .next_row_description = null,
+            .command_complete = null,
+            .limit = settings.rows,
+        };
+    }
 
-/// Executes a statement with optional parameters
-/// Wraps prepared and will automatically drain the datareader to completion
-pub fn execute(
-    self: *Client,
-    statement: []const u8,
-    parameters: []?[]const u8,
-) !void {
-    var data_reader = try self.prepare(
-        statement,
-        parameters,
-    );
-    defer data_reader.deinit();
+    /// Prepares a statement with optional parameters, wraps the extended query for easier use
+    /// If you want to specify prepared statement name for caching use extended
+    pub fn prepare(
+        self: *Client,
+        statement: []const u8,
+        parameters: []?[]const u8,
+    ) !DataReader {
+        const settings = ExtendedQuery{
+            .statement = statement,
+            .parameters = parameters,
+        };
 
-    try data_reader.drain();
-}
+        return self.extended(settings);
+    }
 
-/// Starts a new transaction by running an execute BEGIN command
-pub fn begin(self: *Client) !void {
-    try self.execute("BEGIN", &.{});
-}
-
-/// Commits a transaction by running an execute COMMIT command
-pub fn commit(self: *Client) !void {
-    try self.execute("COMMIT", &.{});
-}
-
-/// Creates a savepoint with a given name using execute
-pub fn savepoint(self: *Client, point: []const u8) !void {
-    try self.execute(
-        "SAVEPOINT $1",
-        &.{point},
-    );
-}
-
-/// Rolls back to a specific savepoint or entire transaction depending on the flow
-pub fn rollback(self: *Client, point: ?[]const u8) !void {
-    if (point) |value| {
-        const statement = "ROLLBACK TO SAVEPOINT $1";
-
-        var params = [_]?[]const u8{value};
-
-        try self.execute(
+    /// Executes a statement with optional parameters
+    /// Wraps prepared and will automatically drain the datareader to completion
+    pub fn execute(
+        self: *Client,
+        statement: []const u8,
+        parameters: []?[]const u8,
+    ) !void {
+        var data_reader = try self.prepare(
             statement,
-            &params,
+            parameters,
         );
-    } else {
-        const statement = "ROLLBACK";
+        defer data_reader.deinit();
 
+        try data_reader.drain();
+    }
+
+    /// Starts a new transaction by running an execute BEGIN command
+    pub fn begin(self: *Client) !void {
+        try self.execute("BEGIN", &.{});
+    }
+
+    /// Commits a transaction by running an execute COMMIT command
+    pub fn commit(self: *Client) !void {
+        try self.execute("COMMIT", &.{});
+    }
+
+    /// Creates a savepoint with a given name using execute
+    pub fn savepoint(self: *Client, point: []const u8) !void {
         try self.execute(
-            statement,
-            &.{},
+            "SAVEPOINT $1",
+            &.{point},
         );
     }
-}
 
-/// Releases a named savepoint executing a RELEASE command
-pub fn release(self: *Client, point: []const u8) !void {
-    try self.execute(
-        "RELEASE $1",
-        &.{point},
-    );
-}
+    /// Rolls back to a specific savepoint or entire transaction depending on the flow
+    pub fn rollback(self: *Client, point: ?[]const u8) !void {
+        if (point) |value| {
+            const statement = "ROLLBACK TO SAVEPOINT $1";
 
-/// Initiates a COPY IN operation for data import
-/// Returns a CopyIn struct for managing the data transfer
-pub fn copyIn(
-    self: *Client,
-    statement: []const u8,
-    parameters: []?[]const u8,
-) !CopyIn {
-    const settings = ExtendedQuery{
-        .statement = statement,
-        .parameters = parameters,
-    };
+            var params = [_]?[]const u8{value};
 
-    var data_reader = try self.extended(settings);
-    defer data_reader.deinit();
+            try self.execute(
+                statement,
+                &params,
+            );
+        } else {
+            const statement = "ROLLBACK";
 
-    self.state = .copying_in;
+            try self.execute(
+                statement,
+                &.{},
+            );
+        }
+    }
 
-    return CopyIn{
-        .client = self,
-        .state = .idle,
-    };
-}
+    /// Releases a named savepoint executing a RELEASE command
+    pub fn release(self: *Client, point: []const u8) !void {
+        try self.execute(
+            "RELEASE $1",
+            &.{point},
+        );
+    }
 
-/// Initiates a COPY OUT operation for data export
-///Returns a CopyOut struct for managing the data transfer
-pub fn copyOut(
-    self: *Client,
-    statement: []const u8,
-    parameters: []?[]const u8,
-) !CopyOut {
-    const settings = ExtendedQuery{
-        .statement = statement,
-        .parameters = parameters,
-    };
+    /// Initiates a COPY IN operation for data import
+    /// Returns a CopyIn struct for managing the data transfer
+    pub fn copyIn(
+        self: *Client,
+        statement: []const u8,
+        parameters: []?[]const u8,
+    ) !CopyIn {
+        const settings = ExtendedQuery{
+            .statement = statement,
+            .parameters = parameters,
+        };
 
-    var data_reader = try self.extended(settings);
-    defer data_reader.deinit();
+        var data_reader = try self.extended(settings);
+        defer data_reader.deinit();
 
-    self.state = .copying_out;
+        self.state = .copying_in;
 
-    return CopyOut{
-        .client = self,
-        .state = .idle,
-    };
-}
+        return CopyIn{
+            .client = self,
+            .state = .idle,
+        };
+    }
+
+    /// Initiates a COPY OUT operation for data export
+    ///Returns a CopyOut struct for managing the data transfer
+    pub fn copyOut(
+        self: *Client,
+        statement: []const u8,
+        parameters: []?[]const u8,
+    ) !CopyOut {
+        const settings = ExtendedQuery{
+            .statement = statement,
+            .parameters = parameters,
+        };
+
+        var data_reader = try self.extended(settings);
+        defer data_reader.deinit();
+
+        self.state = .copying_out;
+
+        return CopyOut{
+            .client = self,
+            .state = .idle,
+        };
+    }
+};
 
 pub const ExtendedQuery = struct {
     statement: []const u8,

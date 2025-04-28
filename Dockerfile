@@ -32,7 +32,7 @@ COPY docker/postgres.crt /usr/local/share/ca-certificates/
 RUN update-ca-certificates
 
 # Install Zig (you can modify the version if needed)
-RUN wget https://ziglang.org/builds/zig-linux-x86_64-0.14.0.tar.xz -O zig.tar.xz && \
+RUN wget https://ziglang.org/download/0.14.0/zig-linux-x86_64-0.14.0.tar.xz -O zig.tar.xz && \
     tar -xf zig.tar.xz && \
     mv zig-linux-x86_64-0.14.0 /opt/zig && \
     ln -s /opt/zig/zig /usr/local/bin/zig && \

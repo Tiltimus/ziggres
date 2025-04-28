@@ -1,8 +1,8 @@
 const std = @import("std");
-const Client = @import("ziggres");
-const ConnectInfo = Client.ConnectInfo;
+const ziggres = @import("ziggres");
+const Client = ziggres.Client;
+const ConnectInfo = ziggres.ConnectInfo;
 const allocator = std.testing.allocator;
-const UNNAMED = Client.UNNAMED;
 const expect = std.testing.expect;
 
 test "simple" {

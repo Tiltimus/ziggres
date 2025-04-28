@@ -1,7 +1,9 @@
 const std = @import("std");
-const Client = @import("ziggres");
-const ConnectInfo = Client.ConnectInfo;
-const DataRow = Client.Protocol.Backend.DataRow;
+const ziggres = @import("ziggres");
+const Client = ziggres.Client;
+const Pool = ziggres.Pool;
+const ConnectInfo = ziggres.ConnectInfo;
+const DataRow = ziggres.Protocol.Backend.DataRow;
 const Allocator = std.mem.Allocator;
 const ThreadPool = std.Thread.Pool;
 const allocator = std.testing.allocator;
@@ -17,14 +19,14 @@ test "pool simple" {
         .password = "password",
     };
 
-    const settings = Client.Pool.Settings{
+    const settings = Pool.Settings{
         .min = 1,
         .max = 3,
         .timeout = 30_000_000_000,
         .attempts = 3,
     };
 
-    var pool = try Client.Pool.init(
+    var pool = try Pool.init(
         allocator,
         connect_info,
         settings,
@@ -52,7 +54,7 @@ test "pool 100" {
         .password = "password",
     };
 
-    var pool = try Client.Pool.init(
+    var pool = try Pool.init(
         allocator,
         connect_info,
         .default,
@@ -90,7 +92,7 @@ test "pool 100" {
     }
 }
 
-fn select(pool: *Client.Pool, statement: []const u8) !void {
+fn select(pool: *Pool, statement: []const u8) !void {
     var client = try pool.acquire();
     defer pool.release(client);
 
@@ -105,7 +107,7 @@ fn select(pool: *Client.Pool, statement: []const u8) !void {
     try expect(data_reader.rows() == 1000);
 }
 
-fn handle(pool: *Client.Pool, statement: []const u8) void {
+fn handle(pool: *Pool, statement: []const u8) void {
     select(pool, statement) catch {
         @panic("FAILED");
     };

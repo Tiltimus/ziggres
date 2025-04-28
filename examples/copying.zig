@@ -1,9 +1,9 @@
 const std = @import("std");
-const Client = @import("ziggres");
-const ConnectInfo = Client.ConnectInfo;
+const ziggres = @import("ziggres");
+const ConnectInfo = ziggres.ConnectInfo;
+const Client = ziggres.Client;
 const allocator = std.testing.allocator;
 const expect = std.testing.expect;
-const UNNAMED = Client.UNNAMED;
 
 test "copying" {
     // TODO: Look into strange issue where after around 482ish copy data with TLSClient

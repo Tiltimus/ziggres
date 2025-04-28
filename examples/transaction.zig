@@ -1,11 +1,12 @@
 const std = @import("std");
-const Client = @import("ziggres");
-const ConnectInfo = Client.ConnectInfo;
-const DataRow = Client.Protocol.Backend.DataRow;
-const DataReader = Client.DataReader;
+const ziggres = @import("ziggres");
+const Client = ziggres.Client;
+const ConnectInfo = ziggres.ConnectInfo;
+const DataRow = ziggres.Protocol.Backend.DataRow;
+const DataReader = ziggres.DataReader;
+const ExtendedQuery = ziggres.ExtendedQuery;
 const Allocator = std.mem.Allocator;
 const allocator = std.testing.allocator;
-const UNNAMED = Client.UNNAMED;
 const expectEqualStrings = std.testing.expectEqualStrings;
 const expect = std.testing.expect;
 
@@ -40,7 +41,7 @@ test "transaction" {
 
     try client.begin();
 
-    const exetened_query = Client.ExtendedQuery{
+    const exetened_query = ExtendedQuery{
         .statement = "SELECT * FROM public.batch",
         .rows = 100,
     };
